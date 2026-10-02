@@ -405,6 +405,39 @@ test("space coupling never collapses the split into one group", async () => {
   expect(Math.max(...counts)).toBeLessThanOrEqual(2);
 });
 
+test("split writes non-element structure members once, with their containment", async () => {
+  const source = ifcOf([
+    "#1=IFCBUILDINGSTOREY('guid1',$,$,$,$,$,$,$,.ELEMENT.,$);",
+    "#2=IFCWALL('guid2',$,$,$,$,$,$,$,$);",
+    "#3=IFCWALL('guid3',$,$,$,$,$,$,$,$);",
+    "#4=IFCANNOTATION('guid4',$,$,$,$,$,#5,$);",
+    "#5=IFCCARTESIANPOINT((0.,0.,0.));",
+    "#6=IFCRELCONTAINEDINSPATIALSTRUCTURE('guid6',$,$,$,(#2,#3,#4),#1);",
+    // Property set of the storey: the storey is in every file, so is this.
+    "#7=IFCPROPERTYSET('guid7',$,'Pset',$,());",
+    "#8=IFCRELDEFINESBYPROPERTIES('guid8',$,$,$,(#1),#7);",
+    // The annotation shares a property relationship with a wall.
+    "#9=IFCPROPERTYSET('guid9',$,'Pset2',$,());",
+    "#10=IFCRELDEFINESBYPROPERTIES('guid10',$,$,$,(#3,#4),#9);",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 2, (g) => `out_${g}.ifc`);
+
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  expect(files).toHaveLength(2);
+  const withAnnotation = files.filter((text) =>
+    text.includes("#4=IFCANNOTATION"),
+  );
+  expect(withAnnotation).toHaveLength(1);
+  expect(withAnnotation[0]).toMatch(
+    /#6=IFCRELCONTAINEDINSPATIALSTRUCTURE\([^;]*#4[^;]*\);/,
+  );
+  for (const text of files) {
+    expect(text).toContain("#8=IFCRELDEFINESBYPROPERTIES");
+    expect(text).toContain("#7=IFCPROPERTYSET");
+  }
+});
+
 test("spatialTypes decides what is shared across every group", async () => {
   const source = syntheticIfc(["IFCWALL", "IFCWALL", "IFCBUILDINGSTOREY"]);
   const [byDefault, none] = await Promise.all(
@@ -671,53 +704,53 @@ test("split ifc", async () => {
   ).toEqual([
     {
       elementCount: 152,
-      rewrittenLines: 547,
-      totalIds: 21911,
+      rewrittenLines: 550,
+      totalIds: 9208,
     },
     {
       elementCount: 147,
-      rewrittenLines: 536,
-      totalIds: 23709,
+      rewrittenLines: 539,
+      totalIds: 9180,
     },
     {
       elementCount: 155,
-      rewrittenLines: 570,
-      totalIds: 23877,
+      rewrittenLines: 573,
+      totalIds: 9272,
     },
     {
       elementCount: 160,
-      rewrittenLines: 586,
-      totalIds: 23944,
-    },
-    {
-      elementCount: 155,
-      rewrittenLines: 566,
-      totalIds: 23888,
-    },
-    {
-      elementCount: 154,
-      rewrittenLines: 568,
-      totalIds: 23848,
-    },
-    {
-      elementCount: 159,
-      rewrittenLines: 573,
-      totalIds: 23937,
-    },
-    {
-      elementCount: 159,
-      rewrittenLines: 572,
-      totalIds: 23939,
+      rewrittenLines: 589,
+      totalIds: 11421,
     },
     {
       elementCount: 155,
       rewrittenLines: 569,
-      totalIds: 23835,
+      totalIds: 9262,
+    },
+    {
+      elementCount: 154,
+      rewrittenLines: 571,
+      totalIds: 9279,
+    },
+    {
+      elementCount: 159,
+      rewrittenLines: 576,
+      totalIds: 9310,
+    },
+    {
+      elementCount: 159,
+      rewrittenLines: 575,
+      totalIds: 9309,
     },
     {
       elementCount: 155,
-      rewrittenLines: 566,
-      totalIds: 23846,
+      rewrittenLines: 572,
+      totalIds: 9262,
+    },
+    {
+      elementCount: 155,
+      rewrittenLines: 569,
+      totalIds: 9271,
     },
   ]);
 
@@ -810,9 +843,10 @@ test("extract ifc", async () => {
   expect(onSplitsResolved).not.toHaveBeenCalled();
   expect(onExtractWarning).not.toHaveBeenCalled();
 
-  // 14576 before reinforcing bars counted as elements: the bars sharing a
-  // relationship with #501 were copied in as plain dependencies, unreferenced.
-  expect(extractedIds.size).toBe(14094);
+  // 14576 before: objects listed next to #501 in a relationship (other types,
+  // reinforcing bars sharing a material association) were copied in as plain
+  // dependencies, unreferenced, together with their geometry.
+  expect(extractedIds.size).toBe(90);
 
   expect(idsToExtract.every((id) => extractedIds.has(id))).toBeTruthy();
 

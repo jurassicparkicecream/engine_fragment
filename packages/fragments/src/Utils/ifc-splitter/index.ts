@@ -761,6 +761,69 @@ function rewriteListArg(original: string, refs: number[]): string {
   return `(${refs.map((r) => `#${r}`).join(",")})`;
 }
 
+/**
+ * Relationships that place an object in the structure. A non-element object
+ * listed here (e.g. an IfcSpatialZone, IfcAnnotation or IfcGrid in a storey)
+ * is written to exactly one group, see {@link claimStructureMembers}.
+ */
+const STRUCTURE_RELS = new Set([
+  "IFCRELCONTAINEDINSPATIALSTRUCTURE",
+  "IFCRELAGGREGATES",
+  "IFCRELNESTS",
+]);
+
+/**
+ * Assigns every object that a structure relationship lists but that is neither
+ * an element nor shared to one group: the group of the first element listed
+ * next to it, or the first group. Without this such objects were copied as
+ * bare dependencies into every group that shared any relationship with them.
+ */
+function claimStructureMembers(
+  relEntries: RelEntry[],
+  groupOf: Map<number, number>,
+  sharedIds: IdSet,
+  allElementIds: Set<number>,
+  firstGroup: number,
+): Map<number, number> {
+  const claimedBy = new Map<number, number>();
+  for (const rel of relEntries) {
+    if (!STRUCTURE_RELS.has(rel.type)) continue;
+    let group: number | undefined;
+    for (const r of rel.listRefs) {
+      group = groupOf.get(r);
+      if (group !== undefined) break;
+    }
+    for (const r of rel.listRefs) {
+      if (allElementIds.has(r) || sharedIds.has(r) || claimedBy.has(r))
+        continue;
+      claimedBy.set(r, group ?? firstGroup);
+    }
+  }
+  return claimedBy;
+}
+
+/**
+ * Collects what a rewritten relationship line references, except the list
+ * entries it dropped: those belong to other groups (or to none).
+ */
+function collectRelDeps(
+  relId: number,
+  listRefs: number[],
+  kept: number[],
+  index: LineIndex,
+  fileIds: IdSet,
+  allElementIds: Set<number>,
+): void {
+  const refs = index.getRefs(relId);
+  if (!refs) return;
+  const dropped = new Set(listRefs);
+  for (const r of kept) dropped.delete(r);
+  for (const rid of refs) {
+    if (allElementIds.has(rid) || dropped.has(rid)) continue;
+    collectDeps(rid, index, fileIds, allElementIds);
+  }
+}
+
 function addToSetMap(
   map: Map<number, Set<number>>,
   key: number,
@@ -1269,6 +1332,20 @@ export class IfcSplitter {
     // 8. Resolve deps for all groups
     const resolveStart = performance.now();
     const groupsData: GroupData[] = [];
+    const groupOf = new Map<number, number>();
+    groups.forEach((ids, g) => {
+      for (const id of ids) groupOf.set(id, g);
+    });
+    const claimedBy = claimStructureMembers(
+      relEntries,
+      groupOf,
+      sharedIds,
+      allElementIds,
+      Math.max(
+        0,
+        groups.findIndex((ids) => ids.size > 0),
+      ),
+    );
 
     for (let g = 0; g < numGroups; g++) {
       const groupElementIds = groups[g];
@@ -1302,21 +1379,28 @@ export class IfcSplitter {
 
       const rewrittenLines = new Map<number, string>();
       for (const rel of relEntries) {
-        const filtered = rel.listRefs.filter((r) => groupElementIds.has(r));
+        // Keep this group's elements, the shared spatial structure (present in
+        // every file) and the non-element objects this group has claimed.
+        const filtered = rel.listRefs.filter(
+          (r) =>
+            groupElementIds.has(r) ||
+            sharedIds.has(r) ||
+            claimedBy.get(r) === g,
+        );
         if (filtered.length === 0) continue;
         const newArgs = [...rel.args];
         newArgs[rel.listIdx] = rewriteListArg(rel.args[rel.listIdx], filtered);
         const rewritten = `${rel.idPrefix}${rel.type}(${newArgs.join(",")});`;
         rewrittenLines.set(rel.id, rewritten);
         fileIds.add(rel.id);
-        const refs = index.getRefs(rel.id);
-        if (refs) {
-          for (const rid of refs) {
-            if (!allElementIds.has(rid)) {
-              collectDeps(rid, index, fileIds, allElementIds);
-            }
-          }
-        }
+        collectRelDeps(
+          rel.id,
+          rel.listRefs,
+          filtered,
+          index,
+          fileIds,
+          allElementIds,
+        );
       }
 
       const totalIds = fileIds.size;
@@ -1451,7 +1535,9 @@ export class IfcSplitter {
         const listRefs = extractRefs(args[listIdx]);
         if (listRefs.length === 0) continue;
 
-        const filtered = listRefs.filter((r) => groupElementIds.has(r));
+        const filtered = listRefs.filter(
+          (r) => groupElementIds.has(r) || sharedIds.has(r),
+        );
         if (filtered.length === 0) continue;
 
         const idMatch = raw!.match(/^(#\d+\s*=\s*)/);
@@ -1460,13 +1546,7 @@ export class IfcSplitter {
         newArgs[listIdx] = rewriteListArg(args[listIdx], filtered);
         rewrittenLines.set(id, `${idMatch[1]}${type}(${newArgs.join(",")});`);
         fileIds.add(id);
-        const refs = index.getRefs(id);
-        if (refs) {
-          for (const rid of refs) {
-            if (!allElementIds.has(rid))
-              collectDeps(rid, index, fileIds, allElementIds);
-          }
-        }
+        collectRelDeps(id, listRefs, filtered, index, fileIds, allElementIds);
       }
     }
     this.emitProgressEvent("relations", relationsStart);
