@@ -7,6 +7,7 @@ import {
   IdSet,
   IfcSplitter,
   IfcSplitterConfig,
+  IfcSplitterCrossPartEvent,
   IfcSplitterGroupsEvent,
   IfcSplitterIO,
   IfcSplitterProgressEvent,
@@ -436,6 +437,89 @@ test("split writes non-element structure members once, with their containment", 
     expect(text).toContain("#8=IFCRELDEFINESBYPROPERTIES");
     expect(text).toContain("#7=IFCPROPERTYSET");
   }
+});
+
+/** Ids a file references but does not define. */
+const danglingRefs = (text: string) => {
+  const defined = new Set(
+    [...text.matchAll(/^#(\d+)=/gm)].map(([, id]) => Number(id)),
+  );
+  const missing: number[] = [];
+  for (const line of text.split("\n")) {
+    const body = line.replace(/^#\d+=/, "").replace(/'[^']*'/g, "");
+    for (const [, id] of body.matchAll(/#(\d+)/g)) {
+      if (!defined.has(Number(id))) missing.push(Number(id));
+    }
+  }
+  return missing;
+};
+
+test("split records relationships across files instead of leaving them dangling", async () => {
+  const source = ifcOf([
+    // two pipes with one port each, connected port to port
+    "#1=IFCPIPESEGMENT('guid1',$,$,$,$,$,$,$,$);",
+    "#2=IFCDISTRIBUTIONPORT('guid2',$,$,$,$,$,$,.SOURCE.,$,$);",
+    "#3=IFCRELNESTS('guid3',$,$,$,#1,(#2));",
+    "#4=IFCPIPESEGMENT('guid4',$,$,$,$,$,$,$,$);",
+    "#5=IFCDISTRIBUTIONPORT('guid5',$,$,$,$,$,$,.SINK.,$,$);",
+    "#6=IFCRELNESTS('guid6',$,$,$,#4,(#5));",
+    "#7=IFCRELCONNECTSPORTS('guid7',$,$,$,#2,#5,$);",
+    // two walls joined at their ends
+    "#10=IFCWALL('guid10',$,$,$,$,$,$,$,$);",
+    "#11=IFCWALL('guid11',$,$,$,$,$,$,$,$);",
+    "#12=IFCRELCONNECTSPATHELEMENTS('guid12',$,$,$,$,#10,#11,(),(),.ATEND.,.ATSTART.);",
+    // a space bounded by a wall
+    "#20=IFCSPACE('guid20',$,$,$,$,$,$,$,.ELEMENT.,$,$);",
+    "#21=IFCRELSPACEBOUNDARY('guid21',$,$,$,#20,#10,$,.PHYSICAL.,.INTERNAL.);",
+  ]);
+  const io = new MemoryIO(source);
+  const splitter = new IfcSplitter(io);
+  const onCrossPart = vi.fn<(event: IfcSplitterCrossPartEvent) => unknown>();
+  splitter.onCrossPartRelations.add(onCrossPart);
+  await splitter.split("in.ifc", 5, (g) => `out_${g}.ifc`, "relations.json");
+
+  const files = [...io.sinks]
+    .filter(([name]) => name.endsWith(".ifc"))
+    .map(([, { text }]) => text);
+  expect(files.length).toBeGreaterThan(1);
+  for (const text of files) expect(danglingRefs(text)).toEqual([]);
+
+  const { relations } = onCrossPart.mock.calls[0][0];
+  // One cluster per group here, so all three relationships span two files.
+  expect(relations.map((r) => r.expressId)).toEqual([7, 12, 21]);
+  for (const id of [7, 12, 21]) {
+    expect(
+      files.some((text) => text.includes(`\n#${id}=`)),
+      `#${id} must not be written`,
+    ).toBe(false);
+  }
+  const ports = relations[0];
+  expect(ports.type).toBe("IFCRELCONNECTSPORTS");
+  expect(ports.guid).toBe("guid7");
+  expect(ports.ends.map(({ attribute, guid }) => [attribute, guid])).toEqual([
+    [4, "guid2"],
+    [5, "guid5"],
+  ]);
+  expect(new Set(ports.ends.map((e) => e.groupId)).size).toBe(2);
+  expect(relations[2].ends.map((e) => e.type)).toEqual(["IFCSPACE", "IFCWALL"]);
+
+  const json = JSON.parse(io.sinks.get("relations.json")!.text);
+  expect(json.format).toBe("ifc-splitter-cross-part-relations");
+  expect(json.relations).toEqual(JSON.parse(JSON.stringify(relations)));
+  expect(Object.keys(json.parts)).toHaveLength(files.length);
+});
+
+test("split keeps a connection whose elements share a file", async () => {
+  const source = ifcOf([
+    "#10=IFCWALL('guid10',$,$,$,$,$,$,$,$);",
+    "#11=IFCWALL('guid11',$,$,$,$,$,$,$,$);",
+    "#12=IFCRELCONNECTSPATHELEMENTS('guid12',$,$,$,$,#10,#11,(),(),.ATEND.,.ATSTART.);",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 1, () => "out.ifc");
+  expect(linesOf(io.sinks.get("out.ifc"))).toContain(
+    "#12=IFCRELCONNECTSPATHELEMENTS",
+  );
 });
 
 test("spatialTypes decides what is shared across every group", async () => {

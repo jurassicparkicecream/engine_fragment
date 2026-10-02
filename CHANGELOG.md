@@ -14,6 +14,10 @@
 * `IfcSplitter`: group id lists are bitmaps (`IdSet`) instead of `Set`s. A group of a large file could exceed V8's `Set` limit of 2^24 entries (`RangeError: Set maximum size exceeded`). `IfcRelNests`, `IfcRelCoversBldgElements`, `IfcRelCoversSpaces`, `IfcRelPositions` and `IfcRelAdheresToElement` are filtered by their related list (argument 5), not by their relating object.
 * `IfcSplitter`: a relationship whose filtered argument is a single reference keeps it as a single reference instead of rewriting it to a one-element list (e.g. `IfcRelConnectsPortToElement`, `IfcRelSpaceBoundary`).
 
+### Features
+
+* `IfcSplitter`: relationships whose elements end up in different files (e.g. `IfcRelConnectsPorts`, `IfcRelConnectsPathElements`, `IfcRelSpaceBoundary`) are no longer written with a reference into another file. They are left out of the parts and reported instead, through the new `onCrossPartRelations` event and, if `split`/`extract` get the new optional last argument, as a JSON file: relationship type, GlobalId, attributes and, per element end, GlobalId and the group that holds it. `IfcRelConnectsElements` and `IfcRelConnectsPathElements` are filtered by `RelatingElement` (argument 5) instead of `ConnectionGeometry` and are no longer dropped.
+
 ### ⚠ BREAKING CHANGES
 
 * `split`/`extract`: have become `async`, have changed signature (including return types) and are scoped under `IfcSplitter`, exposed events (`onProgress`, `onSplitsResolved`, `onExtractWarning`) instead of console logs.

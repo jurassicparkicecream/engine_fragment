@@ -132,6 +132,45 @@ export interface IfcSplitterGroupsEvent {
   data: GroupData[];
 }
 
+/** One element at the end of a relationship that spans output files. */
+export interface IfcSplitterRelationEnd {
+  /** Index of the relationship's attribute that references the element. */
+  attribute: number;
+  /** Position within that attribute when it is a list, otherwise absent. */
+  position?: number;
+  /** GlobalId of the element: stable across the source and every part. */
+  guid: string;
+  /** Express id of the element in the source (and in its part). */
+  expressId: number;
+  type: string;
+  /**
+   * {@link GroupData.groupId} of the file that holds the element, or `null`
+   * if no output file does (`extract`: the element was not extracted).
+   */
+  groupId: number | null;
+}
+
+/**
+ * A relationship whose elements ended up in different output files. It is
+ * left out of every file in which it would reference a missing element, so
+ * each file stays valid, and is reported here instead so that a consumer can
+ * restore it after loading the parts.
+ */
+export interface IfcSplitterCrossPartRelation {
+  type: string;
+  /** GlobalId of the relationship. */
+  guid: string;
+  /** Express id of the relationship in the source. */
+  expressId: number;
+  /** The relationship's attributes as written in the source (`#id` refers to the source). */
+  attributes: string[];
+  ends: IfcSplitterRelationEnd[];
+}
+
+export interface IfcSplitterCrossPartEvent {
+  relations: IfcSplitterCrossPartRelation[];
+}
+
 // ---------------------------------------------------------------------------
 // Internal interfaces
 // ---------------------------------------------------------------------------
@@ -379,6 +418,10 @@ export const listIdxByType = (type: string): number => {
     case "IFCRELPOSITIONS":
     case "IFCRELADHERESTOELEMENT":
       return 5;
+    case "IFCRELCONNECTSELEMENTS":
+    case "IFCRELCONNECTSPATHELEMENTS":
+      // argument 4 is ConnectionGeometry; RelatingElement is 5
+      return 5;
     case "IFCRELCONNECTSWITHREALIZINGELEMENTS":
       return 7;
     case "IFCPRESENTATIONLAYERASSIGNMENT":
@@ -409,6 +452,8 @@ class LineIndex {
   maxId: number = 0;
   private _typeIntern: Map<string, string> = new Map();
   specialRaws: Map<number, string> = new Map();
+  /** GlobalIds of the lines the parser was asked to remember (elements). */
+  guids: Map<number, string> = new Map();
 
   private _refBuf: Int32Array = new Int32Array(4 * 1024 * 1024);
   private _refBufUsed: number = 0;
@@ -489,6 +534,7 @@ class LineIndex {
     (this as any)._refStart = null;
     (this as any)._refLen = null;
     (this as any).specialRaws = null;
+    (this as any).guids = null;
   }
 }
 
@@ -822,6 +868,66 @@ function collectRelDeps(
     if (allElementIds.has(rid) || dropped.has(rid)) continue;
     collectDeps(rid, index, fileIds, allElementIds);
   }
+}
+
+/**
+ * Whether a (rewritten) relationship line would reference an element that is
+ * not in the file: any element it references, except the list entries the
+ * rewrite dropped, must pass `inFile`.
+ */
+function crossesFile(
+  relId: number,
+  listRefs: number[],
+  kept: number[],
+  index: LineIndex,
+  allElementIds: Set<number>,
+  inFile: (id: number) => boolean,
+): boolean {
+  const refs = index.getRefs(relId);
+  if (!refs) return false;
+  const keptSet = new Set(kept);
+  const listSet = new Set(listRefs);
+  for (const r of refs) {
+    if (!allElementIds.has(r) || inFile(r)) continue;
+    if (listSet.has(r) && !keptSet.has(r)) continue;
+    return true;
+  }
+  return false;
+}
+
+const guidOfRaw = (raw: string | undefined) =>
+  /\(\s*'([^']*)'/.exec(raw ?? "")?.[1] ?? "";
+
+function describeCrossPartRelation(
+  relId: number,
+  index: LineIndex,
+  allElementIds: Set<number>,
+  groupOf: (id: number) => number | null,
+): IfcSplitterCrossPartRelation {
+  const raw = index.getRaw(relId);
+  const args = splitIfcArgs(extractArgsString(raw) ?? "");
+  const ends: IfcSplitterRelationEnd[] = [];
+  args.forEach((arg, attribute) => {
+    const isList = arg.trimStart().startsWith("(");
+    extractRefs(arg).forEach((expressId, position) => {
+      if (!allElementIds.has(expressId)) return;
+      ends.push({
+        attribute,
+        ...(isList ? { position } : {}),
+        guid: index.guids.get(expressId) ?? "",
+        expressId,
+        type: index.getType(expressId) ?? "",
+        groupId: groupOf(expressId),
+      });
+    });
+  });
+  return {
+    type: index.getType(relId) ?? "",
+    guid: guidOfRaw(raw),
+    expressId: relId,
+    attributes: args,
+    ends,
+  };
 }
 
 function addToSetMap(
@@ -1206,12 +1312,22 @@ export class IfcSplitter {
   readonly onExtractWarning = new Event<IfcSplitterWarningEvent>();
 
   /**
+   * Fires from `split` and `extract` with the relationships left out because
+   * their elements ended up in different files (or, for `extract`, partly
+   * outside the output). Empty when there are none.
+   */
+  readonly onCrossPartRelations = new Event<IfcSplitterCrossPartEvent>();
+
+  /**
    * Split an IFC file into N roughly equal groups of building elements.
    * @param inputPath - Absolute or relative path to the source IFC file.
    * @param numGroups - Number of output files to produce. Not capped by the
    * splitter, but note that the write pass holds one open writer per non-empty
    * group, so the practical ceiling is the process' file descriptor limit.
    * @param outputPath - Given `groupId` returns output file path.
+   * @param crossPartRelationsPath - Optional path of a JSON file listing the
+   * relationships whose elements ended up in different files, see
+   * {@link onCrossPartRelations}.
    * @returns a map keyed by {@link GroupData.groupId}.
    * @throws {RangeError} if `numGroups` is not a positive integer.
    */
@@ -1219,6 +1335,7 @@ export class IfcSplitter {
     inputPath: string,
     numGroups: number,
     outputPath: (groupId: number) => string,
+    crossPartRelationsPath?: string,
   ): Promise<Map<number, { path: string; ids: IdSet }>> {
     if (!Number.isInteger(numGroups) || numGroups < 1) {
       throw new RangeError(
@@ -1347,6 +1464,8 @@ export class IfcSplitter {
       ),
     );
 
+    const crossPartIds = new Set<number>();
+
     for (let g = 0; g < numGroups; g++) {
       const groupElementIds = groups[g];
       // A group gets nothing when there are fewer clusters than `numGroups`.
@@ -1388,6 +1507,19 @@ export class IfcSplitter {
             claimedBy.get(r) === g,
         );
         if (filtered.length === 0) continue;
+        if (
+          crossesFile(
+            rel.id,
+            rel.listRefs,
+            filtered,
+            index,
+            allElementIds,
+            (id) => groupElementIds.has(id),
+          )
+        ) {
+          crossPartIds.add(rel.id);
+          continue;
+        }
         const newArgs = [...rel.args];
         newArgs[rel.listIdx] = rewriteListArg(rel.args[rel.listIdx], filtered);
         const rewritten = `${rel.idPrefix}${rel.type}(${newArgs.join(",")});`;
@@ -1414,8 +1546,20 @@ export class IfcSplitter {
       });
     }
 
+    const crossPartRelations = [...crossPartIds]
+      .sort((a, b) => a - b)
+      .map((id) =>
+        describeCrossPartRelation(
+          id,
+          index,
+          allElementIds,
+          (eid) => groupOf.get(eid) ?? null,
+        ),
+      );
+
     this.emitProgressEvent("resolve", resolveStart);
     this.onSplitsResolved.trigger({ data: groupsData });
+    this.onCrossPartRelations.trigger({ relations: crossPartRelations });
 
     // Free the index to reclaim memory before the output pass
     const maxParsedId = index.maxId;
@@ -1435,6 +1579,14 @@ export class IfcSplitter {
       groupsData,
       idGroups,
     );
+    if (crossPartRelationsPath !== undefined) {
+      await this.writeCrossPartRelations(
+        crossPartRelationsPath,
+        inputPath,
+        new Map(groupsData.map(({ groupId, filePath }) => [groupId, filePath])),
+        crossPartRelations,
+      );
+    }
     this.emitProgressEvent("write", writeStart);
 
     return new Map(
@@ -1450,6 +1602,9 @@ export class IfcSplitter {
    * @param inputPath  - Absolute or relative path to the source IFC file.
    * @param elementIds - Array of IFC entity IDs (`#id`) for the building elements to extract. Non-element or missing IDs are skipped, each reported through {@link onExtractWarning}.
    * @param outputPath - Path for the output IFC file.
+   * @param crossPartRelationsPath - Optional path of a JSON file listing the
+   * relationships left out because they reference elements that were not
+   * extracted, see {@link onCrossPartRelations}.
    * @throws {Error} if none of `elementIds` resolves to a building element. No
    * output file is produced in that case.
    */
@@ -1457,6 +1612,7 @@ export class IfcSplitter {
     inputPath: string,
     elementIds: number[],
     outputPath: string,
+    crossPartRelationsPath?: string,
   ): Promise<IdSet> {
     // 1. Parse
     const parseStart = performance.now();
@@ -1523,6 +1679,7 @@ export class IfcSplitter {
     const relationsStart = performance.now();
     const fileIds = sharedIds.clone();
     const rewrittenLines = new Map<number, string>();
+    const crossPartIds = new Set<number>();
     for (let id = 0; id <= index.maxId; id++) {
       const type = index.getType(id);
       if (type && shouldRewriteType(type)) {
@@ -1539,6 +1696,14 @@ export class IfcSplitter {
           (r) => groupElementIds.has(r) || sharedIds.has(r),
         );
         if (filtered.length === 0) continue;
+        if (
+          crossesFile(id, listRefs, filtered, index, allElementIds, (eid) =>
+            groupElementIds.has(eid),
+          )
+        ) {
+          crossPartIds.add(id);
+          continue;
+        }
 
         const idMatch = raw!.match(/^(#\d+\s*=\s*)/);
         if (!idMatch) continue;
@@ -1569,7 +1734,15 @@ export class IfcSplitter {
     }
     resolveStyles(fileIds, index, styleMaps, allElementIds);
 
+    const crossPartRelations = [...crossPartIds]
+      .sort((a, b) => a - b)
+      .map((id) =>
+        describeCrossPartRelation(id, index, allElementIds, (eid) =>
+          groupElementIds.has(eid) ? 0 : null,
+        ),
+      );
     this.emitProgressEvent("resolve", resolveStart);
+    this.onCrossPartRelations.trigger({ relations: crossPartRelations });
 
     // 7. Free index, write output
     index.free();
@@ -1624,6 +1797,14 @@ export class IfcSplitter {
       // Reading or writing may reject mid-stream; release the sink either way.
       if (!closed) await abortWriters([writer]);
     }
+    if (crossPartRelationsPath !== undefined) {
+      await this.writeCrossPartRelations(
+        crossPartRelationsPath,
+        inputPath,
+        new Map([[0, outputPath]]),
+        crossPartRelations,
+      );
+    }
     this.emitProgressEvent("write", writeStart);
 
     return fileIds;
@@ -1633,6 +1814,11 @@ export class IfcSplitter {
     const header: string[] = [];
     const footer: string[] = [];
     const index = new LineIndex();
+    const remember = (id: number, type: string, raw: string) => {
+      if (this.config.elementTypes.has(type)) {
+        index.guids.set(id, guidOfRaw(raw));
+      }
+    };
 
     let section: "header" | "data" | "footer" = "header";
     let accumulator = "";
@@ -1652,6 +1838,7 @@ export class IfcSplitter {
             if (info) {
               const refs = extractRefs(accumulator, info.id);
               index.set(info.id, info.type, refs, accumulator);
+              remember(info.id, info.type, accumulator);
               lineCount++;
             }
             accumulator = "";
@@ -1667,6 +1854,7 @@ export class IfcSplitter {
           if (info) {
             const refs = extractRefs(accumulator, info.id);
             index.set(info.id, info.type, refs, accumulator);
+            remember(info.id, info.type, accumulator);
             lineCount++;
           }
           accumulator = "";
@@ -1783,6 +1971,40 @@ export class IfcSplitter {
       throw failure.reason;
     }
     return opened;
+  }
+
+  /**
+   * Writes the cross-part relationships as JSON:
+   * `{ format, version, source, parts: { [groupId]: path }, relations }`.
+   */
+  protected async writeCrossPartRelations(
+    path: string,
+    inputPath: string,
+    parts: Map<number, string>,
+    relations: IfcSplitterCrossPartRelation[],
+  ): Promise<void> {
+    const writer = (await this.io.writableStream(path)).getWriter();
+    let closed = false;
+    try {
+      const head = {
+        format: "ifc-splitter-cross-part-relations",
+        version: 1,
+        source: inputPath,
+        parts: Object.fromEntries(parts),
+      };
+      const headJson = JSON.stringify(head, null, 1);
+      await writer.write(`${headJson.slice(0, -2)},\n "relations": [`);
+      for (let i = 0; i < relations.length; i++) {
+        await writer.write(
+          `${i ? "," : ""}\n  ${JSON.stringify(relations[i])}`,
+        );
+      }
+      await writer.write("\n ]\n}\n");
+      await writer.close();
+      closed = true;
+    } finally {
+      if (!closed) await abortWriters([writer]);
+    }
   }
 
   protected emitProgressEvent(stage: IfcSplitterStage, start: number) {
