@@ -116,7 +116,7 @@ export interface GroupData {
    * because groups that end up with no elements produce no entry at all.
    */
   groupId: number;
-  fileIds: Set<number>;
+  fileIds: IdSet;
   rewrittenLines: Map<number, string>;
   elementCount: number;
   totalIds: number;
@@ -493,13 +493,71 @@ class LineIndex {
 }
 
 // ---------------------------------------------------------------------------
+// Set of IFC ids backed by a bitmap over 0..maxId
+// ---------------------------------------------------------------------------
+
+/**
+ * A set of IFC ids stored as one bit per possible id. A group of a large file
+ * easily holds more ids than a JavaScript `Set` can (2^24 in V8), and the
+ * bitmap is also far smaller: 3.6 MB for 28 million ids.
+ */
+export class IdSet implements Iterable<number> {
+  private readonly bits: Uint32Array;
+  private count = 0;
+
+  /** @param maxId - the largest id this set will ever hold */
+  constructor(readonly maxId: number) {
+    this.bits = new Uint32Array((maxId >>> 5) + 1);
+  }
+
+  get size(): number {
+    return this.count;
+  }
+
+  has(id: number): boolean {
+    if (id < 0 || id > this.maxId) return false;
+    return (this.bits[id >>> 5] & (1 << (id & 31))) !== 0;
+  }
+
+  /** Ids outside 0..maxId are ignored: no line defines them. */
+  add(id: number): this {
+    if (id < 0 || id > this.maxId) return this;
+    const word = id >>> 5;
+    const bit = 1 << (id & 31);
+    if ((this.bits[word] & bit) === 0) {
+      this.bits[word] |= bit;
+      this.count++;
+    }
+    return this;
+  }
+
+  clone(): IdSet {
+    const copy = new IdSet(this.maxId);
+    copy.bits.set(this.bits);
+    copy.count = this.count;
+    return copy;
+  }
+
+  *[Symbol.iterator](): IterableIterator<number> {
+    for (let word = 0; word < this.bits.length; word++) {
+      let value = this.bits[word];
+      while (value !== 0) {
+        const low = value & -value;
+        yield (word << 5) + (31 - Math.clz32(low));
+        value ^= low;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Collect all ids referenced by a given id, recursively.
 // Stops at element boundaries to avoid pulling in other groups' elements.
 // ---------------------------------------------------------------------------
 function collectDeps(
   startId: number,
   index: LineIndex,
-  visited: Set<number>,
+  visited: IdSet,
   allElementIds: Set<number>,
 ): void {
   const stack = [startId];
@@ -525,7 +583,7 @@ function collectDeps(
 function collectDepsAll(
   startId: number,
   index: LineIndex,
-  visited: Set<number>,
+  visited: IdSet,
 ): void {
   const stack = [startId];
   while (stack.length > 0) {
@@ -607,11 +665,10 @@ function buildVoidFillMap(index: LineIndex): VoidFillMap {
  * Relationships whose elements must end up in the same output file, as
  * `[parent argument index, child argument index]`. Besides aggregation this
  * keeps ports with the element they belong to (IfcRelNests in IFC4 and later,
- * IfcRelConnectsPortToElement in IFC2X3), projections or surface features
- * with their host, and elements contained in an IfcSpace (itself a split
- * element) with that space, so neither side is written with a dangling
- * reference. Containment in a storey or building is unaffected: those are not
- * elements, and the parent must be one.
+ * IfcRelConnectsPortToElement in IFC2X3) and projections or surface features
+ * with their host, so neither side is written with a dangling reference.
+ * Elements contained in an IfcSpace are coupled separately, and only as far as
+ * the groups stay balanced: see {@link coupleSpaceContents}.
  */
 const CLUSTER_RELS: ReadonlyMap<string, readonly [number, number]> = new Map([
   ["IFCRELAGGREGATES", [4, 5]],
@@ -619,7 +676,6 @@ const CLUSTER_RELS: ReadonlyMap<string, readonly [number, number]> = new Map([
   ["IFCRELCONNECTSPORTTOELEMENT", [5, 4]],
   ["IFCRELPROJECTSELEMENT", [4, 5]],
   ["IFCRELADHERESTOELEMENT", [4, 5]],
-  ["IFCRELCONTAINEDINSPATIALSTRUCTURE", [5, 4]],
 ]);
 
 function buildAggregateMap(
@@ -668,7 +724,7 @@ function traverseSpatialStructure(index: LineIndex, spatialTypes: Set<string>) {
     const type = index.getType(id);
     if (type && spatialTypes.has(type)) spatialIds.add(id);
   }
-  const sharedIds = new Set<number>();
+  const sharedIds = new IdSet(index.maxId);
   for (const sid of spatialIds) {
     collectDepsAll(sid, index, sharedIds);
   }
@@ -712,6 +768,91 @@ function addToSetMap(
 ): void {
   if (!map.has(key)) map.set(key, new Set());
   map.get(key)!.add(value);
+}
+
+// ---------------------------------------------------------------------------
+// Cluster weights and size-limited coupling
+// ---------------------------------------------------------------------------
+
+/**
+ * Approximate number of lines each cluster adds to a group: its elements and
+ * everything they reference, minus the shared spatial structure. Lines already
+ * counted for an earlier cluster (types, materials, mapped geometry) are
+ * counted again but not traversed again, which keeps this linear in the file.
+ */
+function clusterWeights(
+  clusters: number[][],
+  index: LineIndex,
+  sharedIds: IdSet,
+  allElementIds: Set<number>,
+): number[] {
+  const seenBy = new Int32Array(index.maxId + 1);
+  return clusters.map((cluster, c) => {
+    const stamp = c + 1;
+    let weight = 0;
+    const stack = [...cluster];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seenBy[id] === stamp) continue;
+      const refs = index.getRefs(id);
+      if (!refs) continue;
+      const seenBefore = seenBy[id] !== 0;
+      seenBy[id] = stamp;
+      if (!sharedIds.has(id)) weight++;
+      if (seenBefore) continue;
+      for (let i = 0; i < refs.length; i++) {
+        if (!allElementIds.has(refs[i])) stack.push(refs[i]);
+      }
+    }
+    return weight;
+  });
+}
+
+/**
+ * Moves elements contained in an IfcSpace (IfcSpace is a split element, unlike
+ * a storey) into the cluster of that space, so their containment does not
+ * point into another file. Unlike the couplings in {@link CLUSTER_RELS} this
+ * one can grow without bound (a single space may contain a whole floor), so a
+ * merge is skipped when it would make the cluster heavier than one group's
+ * fair share. Skipped elements keep a containment line whose space lives in
+ * another file.
+ */
+function coupleSpaceContents(
+  clusters: number[][],
+  weights: number[],
+  numGroups: number,
+  index: LineIndex,
+  allElementIds: Set<number>,
+): void {
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  const limit = Math.ceil(total / numGroups);
+  const clusterOf = new Map<number, number>();
+  clusters.forEach((cluster, c) => {
+    for (const eid of cluster) clusterOf.set(eid, c);
+  });
+  for (let id = 0; id <= index.maxId; id++) {
+    if (index.getType(id) !== "IFCRELCONTAINEDINSPATIALSTRUCTURE") continue;
+    const argsStr = extractArgsString(index.getRaw(id));
+    if (!argsStr) continue;
+    const args = splitIfcArgs(argsStr);
+    if (args.length < 6) continue;
+    const spaceId = parseHashRef(args[5]);
+    if (!spaceId || !allElementIds.has(spaceId)) continue;
+    for (const child of extractRefs(args[4])) {
+      const target = clusterOf.get(spaceId);
+      const source = clusterOf.get(child);
+      if (target === undefined || source === undefined) continue;
+      if (source === target) continue;
+      if (weights[target] + weights[source] > limit) continue;
+      for (const eid of clusters[source]) {
+        clusters[target].push(eid);
+        clusterOf.set(eid, target);
+      }
+      weights[target] += weights[source];
+      clusters[source] = [];
+      weights[source] = 0;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,7 +979,7 @@ function buildStyleMaps(index: LineIndex): StyleMaps {
 }
 
 function resolveStyles(
-  fileIds: Set<number>,
+  fileIds: IdSet,
   index: LineIndex,
   styleMaps: StyleMaps,
   allElementIds: Set<number>,
@@ -947,7 +1088,7 @@ async function emitSplitLine(
 async function emitExtractLine(
   writer: WritableStreamDefaultWriter,
   raw: string,
-  includeSet: Set<number>,
+  includeSet: IdSet,
   rewrittenLines: Map<number, string>,
 ): Promise<void> {
   if (raw.charCodeAt(0) !== 35) return; // '#'
@@ -1015,7 +1156,7 @@ export class IfcSplitter {
     inputPath: string,
     numGroups: number,
     outputPath: (groupId: number) => string,
-  ): Promise<Map<number, { path: string; ids: Set<number> }>> {
+  ): Promise<Map<number, { path: string; ids: IdSet }>> {
     if (!Number.isInteger(numGroups) || numGroups < 1) {
       throw new RangeError(
         `numGroups must be a positive integer, received ${numGroups}`,
@@ -1054,24 +1195,28 @@ export class IfcSplitter {
 
     // 5. Build clusters
     const clusterStart = performance.now();
-    const clusters: Set<number>[] = [];
+    const clusters: number[][] = [];
     const assigned = new Set<number>();
     for (const eid of allElementIds) {
       if (assigned.has(eid)) continue;
       const cluster = getCluster(eid, vfMap, aggMap);
-      const elementCluster = new Set<number>();
+      const elementCluster: number[] = [];
       for (const cid of cluster) {
         if (allElementIds.has(cid)) {
-          elementCluster.add(cid);
+          elementCluster.push(cid);
           assigned.add(cid);
         }
       }
       clusters.push(elementCluster);
     }
     assigned.clear();
+    const weights = clusterWeights(clusters, index, sharedIds, allElementIds);
+    coupleSpaceContents(clusters, weights, numGroups, index, allElementIds);
     this.emitProgressEvent("cluster", clusterStart);
 
-    // 6. Distribute clusters into N groups (greedy bin packing)
+    // 6. Distribute clusters into N groups (greedy bin packing by weight, so
+    // that one huge element does not share a group with other huge ones just
+    // because the element counts happen to line up)
     const distributeStart = performance.now();
     const groups: Set<number>[] = Array.from(
       { length: numGroups },
@@ -1079,7 +1224,8 @@ export class IfcSplitter {
     );
     const clusterOrder = clusters
       .map((_, i) => i)
-      .sort((a, b) => clusters[b].size - clusters[a].size);
+      .filter((i) => clusters[i].length > 0)
+      .sort((a, b) => weights[b] - weights[a]);
     const groupSizes = new Array<number>(numGroups).fill(0);
 
     for (const ci of clusterOrder) {
@@ -1088,7 +1234,7 @@ export class IfcSplitter {
         if (groupSizes[g] < groupSizes[minIdx]) minIdx = g;
       }
       for (const id of clusters[ci]) groups[minIdx].add(id);
-      groupSizes[minIdx] += clusters[ci].size;
+      groupSizes[minIdx] += weights[ci];
     }
     this.emitProgressEvent("distribute", distributeStart);
 
@@ -1131,7 +1277,7 @@ export class IfcSplitter {
       // dense and every consumer correlates via `groupId` rather than position.
       if (groupElementIds.size === 0) continue;
 
-      const fileIds = new Set<number>(sharedIds);
+      const fileIds = sharedIds.clone();
 
       for (const eid of groupElementIds) {
         collectDeps(eid, index, fileIds, allElementIds);
@@ -1227,7 +1373,7 @@ export class IfcSplitter {
     inputPath: string,
     elementIds: number[],
     outputPath: string,
-  ): Promise<Set<number>> {
+  ): Promise<IdSet> {
     // 1. Parse
     const parseStart = performance.now();
     const { header, footer, index } = await this.parseIfc(inputPath);
@@ -1291,7 +1437,7 @@ export class IfcSplitter {
 
     // 5. Rewrite relationship lines
     const relationsStart = performance.now();
-    const fileIds = new Set<number>(sharedIds);
+    const fileIds = sharedIds.clone();
     const rewrittenLines = new Map<number, string>();
     for (let id = 0; id <= index.maxId; id++) {
       const type = index.getType(id);

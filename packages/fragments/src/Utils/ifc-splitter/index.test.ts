@@ -4,6 +4,7 @@ import { expect, test, vi } from "vitest";
 import * as WEBIFC from "web-ifc";
 import {
   ELEMENT_TYPES,
+  IdSet,
   IfcSplitter,
   IfcSplitterConfig,
   IfcSplitterGroupsEvent,
@@ -318,6 +319,92 @@ test("split keeps elements contained in a space with that space", async () => {
   );
 });
 
+test("IdSet holds more ids than a Set can", () => {
+  // V8 caps a Set at 2^24 entries; a group of a large file can exceed that.
+  const count = 2 ** 24 + 10;
+  const ids = new IdSet(count + 5);
+  for (let id = 1; id <= count; id++) ids.add(id);
+  ids.add(3); // duplicate
+  ids.add(-1); // out of range
+  ids.add(count + 6); // out of range
+
+  expect(ids.size).toBe(count);
+  expect(ids.has(count)).toBe(true);
+  expect(ids.has(0)).toBe(false);
+  expect(ids.has(count + 1)).toBe(false);
+
+  const copy = ids.clone();
+  copy.add(0);
+  expect(copy.size).toBe(count + 1);
+  expect(ids.has(0)).toBe(false);
+
+  const small = new IdSet(100);
+  for (const id of [64, 3, 31, 32, 0, 100]) small.add(id);
+  expect([...small]).toEqual([0, 3, 31, 32, 64, 100]);
+});
+
+/** An element whose representation is a chain of `weight` extra lines. */
+const heavyElement = (id: number, type: string, weight: number) => {
+  const lines = [`#${id}=${type}('guid${id}',$,$,$,$,$,#${id + 1},$,$);`];
+  for (let i = 1; i < weight; i++) {
+    lines.push(`#${id + i}=IFCCARTESIANPOINT((${i}.,0.,0.),#${id + i + 1});`);
+  }
+  lines.push(`#${id + weight}=IFCCARTESIANPOINT((0.,0.,0.));`);
+  return lines;
+};
+
+const ifcOf = (lines: string[]) =>
+  [
+    "ISO-10303-21;",
+    "HEADER;",
+    "ENDSEC;",
+    "DATA;",
+    ...lines,
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+
+test("split balances groups by size, not by element count", async () => {
+  // By count, the two proxies (1st and 3rd element) would share a group.
+  const source = ifcOf([
+    ...heavyElement(100, "IFCBUILDINGELEMENTPROXY", 50),
+    "#200=IFCWALL('guid200',$,$,$,$,$,$,$,$);",
+    ...heavyElement(300, "IFCBUILDINGELEMENTPROXY", 40),
+    "#400=IFCWALL('guid400',$,$,$,$,$,$,$,$);",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 2, (g) => `out_${g}.ifc`);
+
+  const files = [...io.sinks.values()].map(linesOf);
+  const withProxy = (id: number) =>
+    files.findIndex((lines) =>
+      lines.includes(`#${id}=IFCBUILDINGELEMENTPROXY`),
+    );
+  expect(withProxy(100)).not.toBe(-1);
+  expect(withProxy(300)).not.toBe(-1);
+  expect(withProxy(100)).not.toBe(withProxy(300));
+});
+
+test("space coupling never collapses the split into one group", async () => {
+  const walls = [1, 2, 3, 4, 5, 6].map(
+    (n) => `#${10 + n}=IFCWALL('guid${10 + n}',$,$,$,$,$,$,$,$);`,
+  );
+  const source = ifcOf([
+    "#1=IFCBUILDINGSTOREY('guid1',$,$,$,$,$,$,$,.ELEMENT.,$);",
+    "#2=IFCSPACE('guid2',$,$,$,$,$,$,$,.ELEMENT.,$,$);",
+    ...walls,
+    "#30=IFCRELCONTAINEDINSPATIALSTRUCTURE('guid30',$,$,$,(#11,#12,#13,#14,#15,#16),#2);",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 3, (g) => `out_${g}.ifc`);
+
+  const counts = [...io.sinks.values()].map(
+    (state) => linesOf(state).filter((line) => line.endsWith("IFCWALL")).length,
+  );
+  expect(counts).toHaveLength(3);
+  expect(Math.max(...counts)).toBeLessThanOrEqual(2);
+});
+
 test("spatialTypes decides what is shared across every group", async () => {
   const source = syntheticIfc(["IFCWALL", "IFCWALL", "IFCBUILDINGSTOREY"]);
   const [byDefault, none] = await Promise.all(
@@ -583,54 +670,54 @@ test("split ifc", async () => {
     }),
   ).toEqual([
     {
-      elementCount: 156,
-      rewrittenLines: 567,
-      totalIds: 23420,
+      elementCount: 152,
+      rewrittenLines: 547,
+      totalIds: 21911,
     },
     {
-      elementCount: 155,
-      rewrittenLines: 562,
-      totalIds: 23854,
+      elementCount: 147,
+      rewrittenLines: 536,
+      totalIds: 23709,
     },
     {
       elementCount: 155,
       rewrittenLines: 570,
-      totalIds: 24329,
+      totalIds: 23877,
     },
     {
-      elementCount: 155,
-      rewrittenLines: 554,
-      totalIds: 23346,
-    },
-    {
-      elementCount: 155,
-      rewrittenLines: 554,
-      totalIds: 23370,
+      elementCount: 160,
+      rewrittenLines: 586,
+      totalIds: 23944,
     },
     {
       elementCount: 155,
       rewrittenLines: 566,
-      totalIds: 23896,
+      totalIds: 23888,
     },
     {
-      elementCount: 155,
+      elementCount: 154,
       rewrittenLines: 568,
-      totalIds: 20827,
+      totalIds: 23848,
     },
     {
-      elementCount: 155,
-      rewrittenLines: 568,
-      totalIds: 20378,
-    },
-    {
-      elementCount: 155,
-      rewrittenLines: 568,
-      totalIds: 21277,
-    },
-    {
-      elementCount: 155,
+      elementCount: 159,
       rewrittenLines: 573,
-      totalIds: 24337,
+      totalIds: 23937,
+    },
+    {
+      elementCount: 159,
+      rewrittenLines: 572,
+      totalIds: 23939,
+    },
+    {
+      elementCount: 155,
+      rewrittenLines: 569,
+      totalIds: 23835,
+    },
+    {
+      elementCount: 155,
+      rewrittenLines: 566,
+      totalIds: 23846,
     },
   ]);
 

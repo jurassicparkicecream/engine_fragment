@@ -8,7 +8,9 @@
 * Reuse identical preserved highlight materials across items and repeated updates, while keeping depth, transparency and inheritance settings distinct.
 * Settle forced updates when the scene is empty or the last model is removed, without waiting for a worker FINISH that can no longer arrive.
 * `IfcSplitter`: `ELEMENT_TYPES` now lists every IfcElement subtype of IFC2X3, IFC4 and IFC4X3. Types missing from the list (e.g. `IfcPipeSegment`, `IfcValve`, `IfcAirTerminal`, `IfcReinforcingBar`, `IfcElementAssembly`, `IfcFurniture`) were neither split nor written to any output file, so `split` dropped them silently.
-* `IfcSplitter`: ports stay in the same output file as their element (`IfcRelNests`, `IfcRelConnectsPortToElement`), and so do projections and surface features with their host and elements contained in an `IfcSpace` with that space. `IfcRelNests`, `IfcRelCoversBldgElements`, `IfcRelCoversSpaces`, `IfcRelPositions` and `IfcRelAdheresToElement` are filtered by their related list (argument 5), not by their relating object.
+* `IfcSplitter`: ports stay in the same output file as their element (`IfcRelNests`, `IfcRelConnectsPortToElement`), and so do projections and surface features with their host. Elements contained in an `IfcSpace` join that space's group as long as the group stays within its fair share.
+* `IfcSplitter`: `split` balances groups by the number of lines each cluster pulls in instead of by element count, so a few very large elements (e.g. scanned or meshed proxies) no longer end up in the same group because the counts happened to line up.
+* `IfcSplitter`: group id lists are bitmaps (`IdSet`) instead of `Set`s. A group of a large file could exceed V8's `Set` limit of 2^24 entries (`RangeError: Set maximum size exceeded`). `IfcRelNests`, `IfcRelCoversBldgElements`, `IfcRelCoversSpaces`, `IfcRelPositions` and `IfcRelAdheresToElement` are filtered by their related list (argument 5), not by their relating object.
 * `IfcSplitter`: a relationship whose filtered argument is a single reference keeps it as a single reference instead of rewriting it to a one-element list (e.g. `IfcRelConnectsPortToElement`, `IfcRelSpaceBoundary`).
 
 ### ⚠ BREAKING CHANGES
@@ -16,6 +18,7 @@
 * `split`/`extract`: have become `async`, have changed signature (including return types) and are scoped under `IfcSplitter`, exposed events (`onProgress`, `onSplitsResolved`, `onExtractWarning`) instead of console logs.
 * `extract` now throws if no targets to extract were found, instead of logging and returning without producing an output file
 * `split` now throws a `RangeError` unless `numGroups` is a positive integer. The previous 32-group ceiling is gone: group membership is no longer stored as a `1 << g` bitmask, so any number of splits is supported (bounded in practice by the process' open file descriptor limit, one per group).
+* `split`/`extract`: the returned id lists and `GroupData.fileIds` are `IdSet` (iterable, `has`, `size`) instead of `Set<number>`.
 * `@thatopen/fragments` now requires node `>=20.11.0` (`fs.openAsBlob`, global web streams)
 
 ## [3.4.0](https://github.com/ThatOpen/engine_fragment/compare/v3.3.2...v3.4.0) (2026-04-09)
