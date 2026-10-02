@@ -1,6 +1,7 @@
 import { readFile } from "fs/promises";
 import * as path from "path";
 import { expect, test, vi } from "vitest";
+import * as WEBIFC from "web-ifc";
 import {
   ELEMENT_TYPES,
   IfcSplitter,
@@ -173,6 +174,148 @@ test("elementTypes decides what counts as a splittable element", async () => {
 
   expect(byDefault).toEqual(["#1=IFCWALL"]);
   expect(extended).toEqual(["#2=IFCANNOTATION"]);
+});
+
+test("ELEMENT_TYPES covers every IfcElement subtype of every schema", () => {
+  // web-ifc exports one numeric constant per entity name; its schema tables
+  // list the (transitive) subtypes of each entity per schema.
+  const names = new Map<number, string>();
+  for (const [name, value] of Object.entries(WEBIFC)) {
+    if (/^IFC[A-Z0-9]+$/.test(name) && typeof value === "number") {
+      names.set(value, name);
+    }
+  }
+  const subtypesBySchema = Object.values(
+    WEBIFC.InheritanceDef as Record<number, Record<number, number[]>>,
+  );
+  expect(subtypesBySchema.length).toBeGreaterThanOrEqual(3);
+
+  const missing = new Set<string>();
+  for (const subtypes of subtypesBySchema) {
+    for (const code of subtypes[WEBIFC.IFCELEMENT] ?? []) {
+      const name = names.get(code);
+      expect(name, `type code ${code}`).toBeDefined();
+      if (!ELEMENT_TYPES.includes(name as never)) missing.add(name!);
+    }
+  }
+  expect([...missing]).toEqual([]);
+});
+
+// Regression: these were missing from ELEMENT_TYPES, so split and extract
+// dropped every instance without a warning.
+test.each([
+  "IFCVALVE",
+  "IFCPIPESEGMENT",
+  "IFCDUCTFITTING",
+  "IFCAIRTERMINAL",
+  "IFCREINFORCINGBAR",
+  "IFCELEMENTASSEMBLY",
+  "IFCFURNITURE",
+  "IFCELECTRICDISTRIBUTIONPOINT",
+])("split keeps %s", async (type) => {
+  const io = new MemoryIO(syntheticIfc(["IFCWALL", type]));
+  await new IfcSplitter(io).split(
+    "in.ifc",
+    2,
+    (groupId) => `out_${groupId}.ifc`,
+  );
+
+  expect([...io.sinks.values()].map(linesOf).flat().sort()).toEqual(
+    ["#1=IFCWALL", `#2=${type}`].sort(),
+  );
+});
+
+test("split keeps ports in the same file as their element", async () => {
+  const source = [
+    "ISO-10303-21;",
+    "HEADER;",
+    "ENDSEC;",
+    "DATA;",
+    "#1=IFCPIPESEGMENT('guid1',$,$,$,$,$,$,$,$);",
+    "#2=IFCPIPESEGMENT('guid2',$,$,$,$,$,$,$,$);",
+    "#3=IFCPIPEFITTING('guid3',$,$,$,$,$,$,$,$);",
+    "#4=IFCDISTRIBUTIONPORT('guid4',$,$,$,$,$,$,.SINK.,$,$);",
+    "#5=IFCDISTRIBUTIONPORT('guid5',$,$,$,$,$,$,.SOURCE.,$,$);",
+    // IFC4: ports nested under their element. RelatedObjects is argument 5.
+    "#6=IFCRELNESTS('guid6',$,$,$,#1,(#4,#5));",
+    "#7=IFCDISTRIBUTIONPORT('guid7',$,$,$,$,$,$,.SINK.,$,$);",
+    // IFC2X3: one relationship per port, both arguments single references.
+    "#8=IFCRELCONNECTSPORTTOELEMENT('guid8',$,$,$,#7,#2);",
+    // A port nested under a type object: the parent is no element, so the
+    // relationship can only follow its RelatedObjects.
+    "#9=IFCPIPESEGMENTTYPE('guid9',$,$,$,$,$,$,$,$,.NOTDEFINED.);",
+    "#10=IFCDISTRIBUTIONPORT('guid10',$,$,$,$,$,$,.SINK.,$,$);",
+    "#11=IFCRELNESTS('guid11',$,$,$,#9,(#10));",
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split(
+    "in.ifc",
+    4,
+    (groupId) => `out_${groupId}.ifc`,
+  );
+
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  const fileWith = (line: string) => {
+    const matches = files.filter((text) => text.includes(line));
+    expect(matches, line).toHaveLength(1);
+    return matches[0];
+  };
+
+  const nested = fileWith("#4=IFCDISTRIBUTIONPORT");
+  expect(nested).toContain("#1=IFCPIPESEGMENT");
+  expect(nested).toContain("#5=IFCDISTRIBUTIONPORT");
+  expect(nested).toContain("#6=IFCRELNESTS('guid6',$,$,$,#1,(#4,#5));");
+
+  const connected = fileWith("#7=IFCDISTRIBUTIONPORT");
+  expect(connected).toContain("#2=IFCPIPESEGMENT");
+  // A single reference must stay a single reference, not become `(#7)`.
+  expect(connected).toContain(
+    "#8=IFCRELCONNECTSPORTTOELEMENT('guid8',$,$,$,#7,#2);",
+  );
+
+  const typed = fileWith("#10=IFCDISTRIBUTIONPORT");
+  expect(typed).toContain("#9=IFCPIPESEGMENTTYPE");
+  expect(typed).toContain("#11=IFCRELNESTS('guid11',$,$,$,#9,(#10));");
+
+  expect(fileWith("#3=IFCPIPEFITTING")).not.toContain("IFCDISTRIBUTIONPORT");
+});
+
+test("split keeps elements contained in a space with that space", async () => {
+  const source = [
+    "ISO-10303-21;",
+    "HEADER;",
+    "ENDSEC;",
+    "DATA;",
+    "#1=IFCBUILDINGSTOREY('guid1',$,$,$,$,$,$,$,.ELEMENT.,$);",
+    "#2=IFCSPACE('guid2',$,$,$,$,$,$,$,.ELEMENT.,$,$);",
+    "#3=IFCFURNITURE('guid3',$,$,$,$,$,$,$,$);",
+    "#4=IFCWALL('guid4',$,$,$,$,$,$,$,$);",
+    "#5=IFCWALL('guid5',$,$,$,$,$,$,$,$);",
+    "#6=IFCRELCONTAINEDINSPATIALSTRUCTURE('guid6',$,$,$,(#3),#2);",
+    "#7=IFCRELCONTAINEDINSPATIALSTRUCTURE('guid7',$,$,$,(#4,#5),#1);",
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split(
+    "in.ifc",
+    3,
+    (groupId) => `out_${groupId}.ifc`,
+  );
+
+  const files = [...io.sinks.values()].map(linesOf);
+  expect(files).toHaveLength(3);
+  const withSpace = files.filter((lines) => lines.includes("#2=IFCSPACE"));
+  expect(withSpace).toHaveLength(1);
+  expect(withSpace[0]).toContain("#3=IFCFURNITURE");
+  expect(withSpace[0]).toContain("#6=IFCRELCONTAINEDINSPATIALSTRUCTURE");
+  // Walls in the storey are still split one by one.
+  expect(files.filter((lines) => lines.includes("#4=IFCWALL"))).toHaveLength(1);
+  expect(files.find((lines) => lines.includes("#4=IFCWALL"))).not.toContain(
+    "#5=IFCWALL",
+  );
 });
 
 test("spatialTypes decides what is shared across every group", async () => {
@@ -440,54 +583,54 @@ test("split ifc", async () => {
     }),
   ).toEqual([
     {
-      elementCount: 92,
-      rewrittenLines: 427,
-      totalIds: 23892,
+      elementCount: 156,
+      rewrittenLines: 567,
+      totalIds: 23420,
     },
     {
-      elementCount: 92,
-      rewrittenLines: 428,
-      totalIds: 22972,
+      elementCount: 155,
+      rewrittenLines: 562,
+      totalIds: 23854,
     },
     {
-      elementCount: 92,
-      rewrittenLines: 441,
-      totalIds: 23438,
+      elementCount: 155,
+      rewrittenLines: 570,
+      totalIds: 24329,
     },
     {
-      elementCount: 92,
-      rewrittenLines: 439,
-      totalIds: 23954,
+      elementCount: 155,
+      rewrittenLines: 554,
+      totalIds: 23346,
     },
     {
-      elementCount: 92,
-      rewrittenLines: 442,
-      totalIds: 22957,
+      elementCount: 155,
+      rewrittenLines: 554,
+      totalIds: 23370,
     },
     {
-      elementCount: 92,
-      rewrittenLines: 443,
-      totalIds: 22979,
+      elementCount: 155,
+      rewrittenLines: 566,
+      totalIds: 23896,
     },
     {
-      elementCount: 92,
-      rewrittenLines: 444,
-      totalIds: 23459,
+      elementCount: 155,
+      rewrittenLines: 568,
+      totalIds: 20827,
     },
     {
-      elementCount: 91,
-      rewrittenLines: 442,
-      totalIds: 22957,
+      elementCount: 155,
+      rewrittenLines: 568,
+      totalIds: 20378,
     },
     {
-      elementCount: 91,
-      rewrittenLines: 441,
-      totalIds: 22501,
+      elementCount: 155,
+      rewrittenLines: 568,
+      totalIds: 21277,
     },
     {
-      elementCount: 91,
-      rewrittenLines: 438,
-      totalIds: 23390,
+      elementCount: 155,
+      rewrittenLines: 573,
+      totalIds: 24337,
     },
   ]);
 
@@ -580,7 +723,9 @@ test("extract ifc", async () => {
   expect(onSplitsResolved).not.toHaveBeenCalled();
   expect(onExtractWarning).not.toHaveBeenCalled();
 
-  expect(extractedIds.size).toBe(14576);
+  // 14576 before reinforcing bars counted as elements: the bars sharing a
+  // relationship with #501 were copied in as plain dependencies, unreferenced.
+  expect(extractedIds.size).toBe(14094);
 
   expect(idsToExtract.every((id) => extractedIds.has(id))).toBeTruthy();
 

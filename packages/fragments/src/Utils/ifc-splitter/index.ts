@@ -95,7 +95,7 @@ export interface VoidFillMap {
   relLineIds: Map<number, Set<number>>;
 }
 
-/** Parent-child aggregation relationships between building elements (e.g. roof to slabs). */
+/** Parent-child relationships between building elements that must stay together (e.g. roof to slabs, element to its ports). */
 export interface AggregateMap {
   parentToChildren: Map<number, Set<number>>;
   childToParent: Map<number, number>;
@@ -158,6 +158,13 @@ interface RelEntry {
 /**
  * The default {@link IfcSplitterConfig.elementTypes}.
  * Exported so it can be extended rather than replaced.
+ *
+ * Every subtype of IfcElement in IFC2X3, IFC4 and IFC4X3, plus three
+ * products that are not IfcElements but carry their own geometry or belong to
+ * one: IFCSPACE, IFCDISTRIBUTIONPORT and IFCPROXY. Anything not listed here is
+ * neither split nor copied into any output file, so a missing type silently
+ * drops all of its instances. The test suite checks this list against the
+ * schema tables of web-ifc.
  */
 export const ELEMENT_TYPES = Object.freeze([
   "IFCWALL",
@@ -213,6 +220,133 @@ export const ELEMENT_TYPES = Object.freeze([
   "IFCGEOGRAPHICELEMENT",
   "IFCPROXY",
   "IFCMECHANICALFASTENER",
+  // The remaining IfcElement subtypes of IFC2X3, IFC4 and IFC4X3
+  "IFCACTUATOR",
+  "IFCAIRTERMINAL",
+  "IFCAIRTERMINALBOX",
+  "IFCAIRTOAIRHEATRECOVERY",
+  "IFCALARM",
+  "IFCAUDIOVISUALAPPLIANCE",
+  "IFCBEARING",
+  "IFCBOILER",
+  "IFCBOREHOLE",
+  "IFCBUILDINGELEMENT",
+  "IFCBUILDINGELEMENTCOMPONENT",
+  "IFCBUILTELEMENT",
+  "IFCBURNER",
+  "IFCCABLECARRIERFITTING",
+  "IFCCABLECARRIERSEGMENT",
+  "IFCCABLEFITTING",
+  "IFCCABLESEGMENT",
+  "IFCCAISSONFOUNDATION",
+  "IFCCHAMFEREDGEFEATURE",
+  "IFCCHILLER",
+  "IFCCIVILELEMENT",
+  "IFCCOIL",
+  "IFCCOMMUNICATIONSAPPLIANCE",
+  "IFCCOMPRESSOR",
+  "IFCCONDENSER",
+  "IFCCONTROLLER",
+  "IFCCONVEYORSEGMENT",
+  "IFCCOOLEDBEAM",
+  "IFCCOOLINGTOWER",
+  "IFCCOURSE",
+  "IFCDAMPER",
+  "IFCDEEPFOUNDATION",
+  "IFCDISCRETEACCESSORY",
+  "IFCDISTRIBUTIONBOARD",
+  "IFCDISTRIBUTIONCHAMBERELEMENT",
+  "IFCDUCTFITTING",
+  "IFCDUCTSEGMENT",
+  "IFCDUCTSILENCER",
+  "IFCEARTHWORKSCUT",
+  "IFCEARTHWORKSELEMENT",
+  "IFCEARTHWORKSFILL",
+  "IFCEDGEFEATURE",
+  "IFCELECTRICALELEMENT",
+  "IFCELECTRICAPPLIANCE",
+  "IFCELECTRICDISTRIBUTIONBOARD",
+  "IFCELECTRICDISTRIBUTIONPOINT",
+  "IFCELECTRICFLOWSTORAGEDEVICE",
+  "IFCELECTRICFLOWTREATMENTDEVICE",
+  "IFCELECTRICGENERATOR",
+  "IFCELECTRICMOTOR",
+  "IFCELECTRICTIMECONTROL",
+  "IFCELEMENTASSEMBLY",
+  "IFCELEMENTCOMPONENT",
+  "IFCENGINE",
+  "IFCEQUIPMENTELEMENT",
+  "IFCEVAPORATIVECOOLER",
+  "IFCEVAPORATOR",
+  "IFCFAN",
+  "IFCFASTENER",
+  "IFCFEATUREELEMENT",
+  "IFCFEATUREELEMENTADDITION",
+  "IFCFEATUREELEMENTSUBTRACTION",
+  "IFCFILTER",
+  "IFCFIRESUPPRESSIONTERMINAL",
+  "IFCFLOWINSTRUMENT",
+  "IFCFLOWMETER",
+  "IFCFURNITURE",
+  "IFCGEOMODEL",
+  "IFCGEOSLICE",
+  "IFCGEOTECHNICALASSEMBLY",
+  "IFCGEOTECHNICALELEMENT",
+  "IFCGEOTECHNICALSTRATUM",
+  "IFCHEATEXCHANGER",
+  "IFCHUMIDIFIER",
+  "IFCIMPACTPROTECTIONDEVICE",
+  "IFCINTERCEPTOR",
+  "IFCJUNCTIONBOX",
+  "IFCKERB",
+  "IFCLAMP",
+  "IFCLIGHTFIXTURE",
+  "IFCLIQUIDTERMINAL",
+  "IFCMEDICALDEVICE",
+  "IFCMOBILETELECOMMUNICATIONSAPPLIANCE",
+  "IFCMOORINGDEVICE",
+  "IFCMOTORCONNECTION",
+  "IFCNAVIGATIONELEMENT",
+  "IFCOPENINGSTANDARDCASE",
+  "IFCOUTLET",
+  "IFCPAVEMENT",
+  "IFCPIPEFITTING",
+  "IFCPIPESEGMENT",
+  "IFCPROJECTIONELEMENT",
+  "IFCPROTECTIVEDEVICE",
+  "IFCPROTECTIVEDEVICETRIPPINGUNIT",
+  "IFCPUMP",
+  "IFCRAIL",
+  "IFCREINFORCEDSOIL",
+  "IFCREINFORCINGBAR",
+  "IFCREINFORCINGELEMENT",
+  "IFCREINFORCINGMESH",
+  "IFCROUNDEDEDGEFEATURE",
+  "IFCSENSOR",
+  "IFCSIGN",
+  "IFCSIGNAL",
+  "IFCSOLARDEVICE",
+  "IFCSPACEHEATER",
+  "IFCSTACKTERMINAL",
+  "IFCSURFACEFEATURE",
+  "IFCSWITCHINGDEVICE",
+  "IFCSYSTEMFURNITUREELEMENT",
+  "IFCTANK",
+  "IFCTENDON",
+  "IFCTENDONANCHOR",
+  "IFCTENDONCONDUIT",
+  "IFCTRACKELEMENT",
+  "IFCTRANSFORMER",
+  "IFCTRANSPORTATIONDEVICE",
+  "IFCTUBEBUNDLE",
+  "IFCUNITARYCONTROLELEMENT",
+  "IFCUNITARYEQUIPMENT",
+  "IFCVALVE",
+  "IFCVEHICLE",
+  "IFCVIBRATIONDAMPER",
+  "IFCVIBRATIONISOLATOR",
+  "IFCVOIDINGFEATURE",
+  "IFCWASTETERMINAL",
 ] as const);
 
 /**
@@ -239,6 +373,11 @@ export const SPATIAL_TYPES = Object.freeze([
 export const listIdxByType = (type: string): number => {
   switch (type) {
     case "IFCRELAGGREGATES":
+    case "IFCRELNESTS":
+    case "IFCRELCOVERSBLDGELEMENTS":
+    case "IFCRELCOVERSSPACES":
+    case "IFCRELPOSITIONS":
+    case "IFCRELADHERESTOELEMENT":
       return 5;
     case "IFCRELCONNECTSWITHREALIZINGELEMENTS":
       return 7;
@@ -464,6 +603,25 @@ function buildVoidFillMap(index: LineIndex): VoidFillMap {
   };
 }
 
+/**
+ * Relationships whose elements must end up in the same output file, as
+ * `[parent argument index, child argument index]`. Besides aggregation this
+ * keeps ports with the element they belong to (IfcRelNests in IFC4 and later,
+ * IfcRelConnectsPortToElement in IFC2X3), projections or surface features
+ * with their host, and elements contained in an IfcSpace (itself a split
+ * element) with that space, so neither side is written with a dangling
+ * reference. Containment in a storey or building is unaffected: those are not
+ * elements, and the parent must be one.
+ */
+const CLUSTER_RELS: ReadonlyMap<string, readonly [number, number]> = new Map([
+  ["IFCRELAGGREGATES", [4, 5]],
+  ["IFCRELNESTS", [4, 5]],
+  ["IFCRELCONNECTSPORTTOELEMENT", [5, 4]],
+  ["IFCRELPROJECTSELEMENT", [4, 5]],
+  ["IFCRELADHERESTOELEMENT", [4, 5]],
+  ["IFCRELCONTAINEDINSPATIALSTRUCTURE", [5, 4]],
+]);
+
 function buildAggregateMap(
   index: LineIndex,
   allElementIds: Set<number>,
@@ -474,18 +632,20 @@ function buildAggregateMap(
 
   for (let id = 0; id <= index.maxId; id++) {
     const type = index.getType(id);
-    if (type !== "IFCRELAGGREGATES") continue;
+    const argIdx = type && CLUSTER_RELS.get(type);
+    if (!argIdx) continue;
+    const [parentIdx, childIdx] = argIdx;
 
     const raw = index.getRaw(id);
     const argsStr = extractArgsString(raw);
     if (!argsStr) continue;
     const args = splitIfcArgs(argsStr);
-    if (args.length < 6) continue;
+    if (args.length <= Math.max(parentIdx, childIdx)) continue;
 
-    const parentId = parseHashRef(args[4]);
+    const parentId = parseHashRef(args[parentIdx]);
     if (!parentId || !allElementIds.has(parentId)) continue;
 
-    const childRefs = extractRefs(args[5]);
+    const childRefs = extractRefs(args[childIdx]);
     const elementChildren = childRefs.filter((r) => allElementIds.has(r));
     if (elementChildren.length === 0) continue;
 
@@ -532,6 +692,17 @@ function traverseSpatialStructure(index: LineIndex, spatialTypes: Set<string>) {
     }
   }
   return sharedIds;
+}
+
+/**
+ * The rewritten value of a relationship's element argument, keeping only
+ * `refs`. A list stays a list; a single reference (e.g. RelatingPort of
+ * IfcRelConnectsPortToElement) is kept as it is, because wrapping it in
+ * parentheses would turn it into a list where the schema expects an entity.
+ */
+function rewriteListArg(original: string, refs: number[]): string {
+  if (!original.trimStart().startsWith("(")) return original;
+  return `(${refs.map((r) => `#${r}`).join(",")})`;
 }
 
 function addToSetMap(
@@ -987,9 +1158,8 @@ export class IfcSplitter {
       for (const rel of relEntries) {
         const filtered = rel.listRefs.filter((r) => groupElementIds.has(r));
         if (filtered.length === 0) continue;
-        const newList = `(${filtered.map((r) => `#${r}`).join(",")})`;
         const newArgs = [...rel.args];
-        newArgs[rel.listIdx] = newList;
+        newArgs[rel.listIdx] = rewriteListArg(rel.args[rel.listIdx], filtered);
         const rewritten = `${rel.idPrefix}${rel.type}(${newArgs.join(",")});`;
         rewrittenLines.set(rel.id, rewritten);
         fileIds.add(rel.id);
@@ -1140,9 +1310,8 @@ export class IfcSplitter {
 
         const idMatch = raw!.match(/^(#\d+\s*=\s*)/);
         if (!idMatch) continue;
-        const newList = `(${filtered.map((r) => `#${r}`).join(",")})`;
         const newArgs = [...args];
-        newArgs[listIdx] = newList;
+        newArgs[listIdx] = rewriteListArg(args[listIdx], filtered);
         rewrittenLines.set(id, `${idMatch[1]}${type}(${newArgs.join(",")});`);
         fileIds.add(id);
         const refs = index.getRefs(id);
