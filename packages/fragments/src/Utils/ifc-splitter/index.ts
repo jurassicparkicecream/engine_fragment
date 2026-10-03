@@ -707,6 +707,8 @@ class LineIndex {
   specialRaws: Map<number, string> = new Map();
   /** GlobalIds of the lines the parser was asked to remember (elements). */
   guids: Map<number, string> = new Map();
+  /** Ids of the lines whose first attribute is a GlobalId (IfcRoot). */
+  rootIds: number[] = [];
 
   private _refBuf: Int32Array = new Int32Array(4 * 1024 * 1024);
   private _refBufUsed: number = 0;
@@ -789,6 +791,7 @@ class LineIndex {
     (this as any)._refLen = null;
     (this as any).specialRaws = null;
     (this as any).guids = null;
+    (this as any).rootIds = null;
   }
 }
 
@@ -1843,6 +1846,55 @@ export class IfcSplitter {
       });
     }
 
+    // 8b. Objects with a GlobalId that no group took (an unused type, a file
+    // without any element): the first group gets them, so nothing is lost.
+    const leftovers = index.rootIds.filter(
+      (id) =>
+        !crossPartIds.has(id) && !groupsData.some((d) => d.fileIds.has(id)),
+    );
+    if (leftovers.length > 0) {
+      let first = groupsData[0];
+      if (!first) {
+        first = {
+          groupId: 0,
+          fileIds: sharedIds.clone(),
+          rewrittenLines: new Map(),
+          elementCount: 0,
+          totalIds: 0,
+          filePath: outputPath(0),
+        };
+        groupsData.push(first);
+      }
+      const inFirst = (id: number) => groups[first.groupId].has(id);
+      for (const id of leftovers) {
+        if (
+          crossesFile(id, [], [], index, allElementIds, inFirst) ||
+          (allElementIds.has(id) && !inFirst(id))
+        ) {
+          if (shouldRewriteType(index.getType(id) ?? "")) crossPartIds.add(id);
+          continue;
+        }
+        first.fileIds.add(id);
+        const refs = index.getRefs(id);
+        if (refs) {
+          for (const r of refs) {
+            if (!allElementIds.has(r)) {
+              collectDeps(r, index, first.fileIds, allElementIds);
+            }
+          }
+        }
+      }
+      attachBackward(
+        backward,
+        first.fileIds,
+        index,
+        allElementIds,
+        first.rewrittenLines,
+      );
+      resolveStyles(first.fileIds, index, styleMaps, allElementIds);
+      first.totalIds = first.fileIds.size;
+    }
+
     const crossPartRelations = [...crossPartIds]
       .sort((a, b) => a - b)
       .map((id) =>
@@ -2129,6 +2181,9 @@ export class IfcSplitter {
     const remember = (id: number, type: string, raw: string) => {
       if (this.config.elementTypes.has(type)) {
         index.guids.set(id, guidOfRaw(raw));
+      }
+      if (/^#\d+\s*=\s*\w+\s*\(\s*'[0-9A-Za-z_$]{22}'/.test(raw)) {
+        index.rootIds.push(id);
       }
     };
 

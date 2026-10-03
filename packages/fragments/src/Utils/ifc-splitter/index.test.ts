@@ -617,6 +617,35 @@ test("split and extract ignore comments in the data section", async () => {
   expect([...extracted]).toEqual([2]);
 });
 
+test("split keeps objects that no group takes in the first file", async () => {
+  // A type nobody uses, and a file without a single element.
+  const withElements = ifcOf([
+    "#1=IFCWALL('guid1',$,$,$,$,$,$,$,$);",
+    "#2=IFCWALL('guid2',$,$,$,$,$,$,$,$);",
+    "#3=IFCSLABTYPE('0kF4yZzbX2Ae7hJIuV0q3w',$,'Unused',$,$,$,$,$,$,.FLOOR.);",
+  ]);
+  const io = new MemoryIO(withElements);
+  await new IfcSplitter(io).split("in.ifc", 2, (g) => `out_${g}.ifc`);
+  expect(linesOf(io.sinks.get("out_0.ifc"))).toContain("#3=IFCSLABTYPE");
+  expect(linesOf(io.sinks.get("out_1.ifc"))).not.toContain("#3=IFCSLABTYPE");
+
+  const library = ifcOf([
+    "#1=IFCPROJECT('2bVxXH1mP0VhQ4f1q_Ji4N',$,$,$,$,$,$,$,$);",
+    "#2=IFCWALLTYPE('1lMLB0SQ93WAuUz8n0FVrW',$,'Library type',$,$,$,$,$,$,.STANDARD.);",
+  ]);
+  const io2 = new MemoryIO(library);
+  const result = await new IfcSplitter(io2).split(
+    "in.ifc",
+    2,
+    (g) => `out_${g}.ifc`,
+  );
+  expect([...result.keys()]).toEqual([0]);
+  expect(linesOf(io2.sinks.get("out_0.ifc"))).toEqual([
+    "#1=IFCPROJECT",
+    "#2=IFCWALLTYPE",
+  ]);
+});
+
 test("spatialTypes decides what is shared across every group", async () => {
   const source = syntheticIfc(["IFCWALL", "IFCWALL", "IFCBUILDINGSTOREY"]);
   const [byDefault, none] = await Promise.all(
