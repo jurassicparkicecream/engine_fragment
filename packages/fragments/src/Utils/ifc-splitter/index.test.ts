@@ -921,6 +921,23 @@ test("a layer keeps representations that only the first file takes as leftovers"
   );
 });
 
+test("relationships of the first file are widened by its leftovers", async () => {
+  const source = ifcOf([
+    "#1=IFCPIPESEGMENT('guid1',$,$,$,$,$,$,$,$);",
+    "#2=IFCDISTRIBUTIONSYSTEM('guid2',$,'System',$,$,$,$);",
+    "#3=IFCRELASSIGNSTOGROUP('guid3',$,$,$,(#1),$,#2);",
+    // a zone nothing else refers to, grouped with the system
+    "#4=IFCZONE('guid4',$,'Zone',$,$,$);",
+    "#5=IFCGROUP('guid5',$,'Gruppe',$,$);",
+    "#6=IFCRELASSIGNSTOGROUP('guid6',$,$,$,(#2,#4),$,#5);",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 1, () => "out.ifc");
+  expect(io.sinks.get("out.ifc")!.text).toContain(
+    "#6=IFCRELASSIGNSTOGROUP('guid6',$,$,$,(#2,#4),$,#5);",
+  );
+});
+
 test("spatialTypes decides what is shared across every group", async () => {
   const source = syntheticIfc(["IFCWALL", "IFCWALL", "IFCBUILDINGSTOREY"]);
   const [byDefault, none] = await Promise.all(

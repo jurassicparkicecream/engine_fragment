@@ -1888,44 +1888,22 @@ export class IfcSplitter {
 
     const crossPartIds = new Set<number>();
 
-    for (let g = 0; g < numGroups; g++) {
-      const groupElementIds = groups[g];
-      // A group gets nothing when there are fewer clusters than `numGroups`.
-      // Such a group produces no entry and no output file, so `groupsData` is
-      // dense and every consumer correlates via `groupId` rather than position.
-      if (groupElementIds.size === 0) continue;
-
-      const fileIds = sharedIds.clone();
-
-      for (const eid of groupElementIds) {
-        collectDeps(eid, index, fileIds, allElementIds);
-      }
-
-      for (const eid of groupElementIds) {
-        const rels = vfMap.relLineIds.get(eid);
-        if (rels) {
-          for (const rid of rels) {
-            collectDeps(rid, index, fileIds, allElementIds);
-          }
-        }
-        const aggRels = aggMap.aggregateRelIds.get(eid);
-        if (aggRels) {
-          for (const rid of aggRels) {
-            collectDeps(rid, index, fileIds, allElementIds);
-          }
-        }
-      }
-
-      resolveStyles(fileIds, index, styleMaps, allElementIds);
-
-      const rewrittenLines = new Map<number, string>();
+    // Rewrites the group's relationships into its file. Pass 1 keeps the
+    // group's own objects; from `firstPass` 2 on, see below.
+    const rewriteGroup = (
+      g: number,
+      groupElementIds: Set<number>,
+      fileIds: IdSet,
+      rewrittenLines: Map<number, string>,
+      firstPass: number,
+    ) => {
       // Pass 1 keeps the group's own objects. Later passes also keep
       // non-element objects already in the file (e.g. the type objects of the
       // group's elements, a superior system), and repeat until nothing
       // changes, because a kept relationship can bring in an object that an
       // earlier listed relationship needs.
       const crossedHere = new Set<number>();
-      for (let pass = 1; ; pass++) {
+      for (let pass = firstPass; ; pass++) {
         const before = fileIds.size;
         for (const rel of relEntries) {
           if (crossedHere.has(rel.id)) continue;
@@ -1972,6 +1950,40 @@ export class IfcSplitter {
         }
         if (pass > 1 && fileIds.size === before) break;
       }
+    };
+
+    for (let g = 0; g < numGroups; g++) {
+      const groupElementIds = groups[g];
+      // A group gets nothing when there are fewer clusters than `numGroups`.
+      // Such a group produces no entry and no output file, so `groupsData` is
+      // dense and every consumer correlates via `groupId` rather than position.
+      if (groupElementIds.size === 0) continue;
+
+      const fileIds = sharedIds.clone();
+
+      for (const eid of groupElementIds) {
+        collectDeps(eid, index, fileIds, allElementIds);
+      }
+
+      for (const eid of groupElementIds) {
+        const rels = vfMap.relLineIds.get(eid);
+        if (rels) {
+          for (const rid of rels) {
+            collectDeps(rid, index, fileIds, allElementIds);
+          }
+        }
+        const aggRels = aggMap.aggregateRelIds.get(eid);
+        if (aggRels) {
+          for (const rid of aggRels) {
+            collectDeps(rid, index, fileIds, allElementIds);
+          }
+        }
+      }
+
+      resolveStyles(fileIds, index, styleMaps, allElementIds);
+
+      const rewrittenLines = new Map<number, string>();
+      rewriteGroup(g, groupElementIds, fileIds, rewrittenLines, 1);
 
       attachBackward(backward, fileIds, index, allElementIds, rewrittenLines);
       resolveStyles(fileIds, index, styleMaps, allElementIds);
@@ -2037,6 +2049,14 @@ export class IfcSplitter {
           }
         }
       }
+      // the leftovers can widen relationships the first file already has
+      rewriteGroup(
+        first.groupId,
+        groups[first.groupId],
+        first.fileIds,
+        first.rewrittenLines,
+        2,
+      );
       attachBackward(
         backward,
         first.fileIds,
