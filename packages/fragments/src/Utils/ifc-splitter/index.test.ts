@@ -165,18 +165,25 @@ const linesOf = (state: SinkState | undefined) =>
   [...state!.text.matchAll(/^#\d+=\w+/gm)].map(([line]) => line);
 
 test("elementTypes decides what counts as a splittable element", async () => {
-  // A made-up type: every IfcProduct is in the defaults.
+  // A made-up type: every IfcProduct is in the defaults. A line that is not an
+  // element is not split; it still ends up in the first file (nothing is lost).
   const source = syntheticIfc(["IFCWALL", "IFCMYELEMENT"]);
   const [byDefault, extended] = await Promise.all(
     [undefined, { elementTypes: ["IFCMYELEMENT"] }].map(async (config) => {
       const io = new MemoryIO(source);
-      await new IfcSplitter(io, config).split("in.ifc", 1, () => "out.ifc");
-      return linesOf(io.sinks.get("out.ifc"));
+      const splitter = new IfcSplitter(io, config);
+      let elements = 0;
+      splitter.onSplitsResolved.add(({ data }) => {
+        elements = data.reduce((sum, d) => sum + d.elementCount, 0);
+      });
+      await splitter.split("in.ifc", 1, () => "out.ifc");
+      return { elements, lines: linesOf(io.sinks.get("out.ifc")) };
     }),
   );
 
-  expect(byDefault).toEqual(["#1=IFCWALL"]);
-  expect(extended).toEqual(["#2=IFCMYELEMENT"]);
+  expect(byDefault.elements).toBe(1);
+  expect(extended.elements).toBe(1);
+  expect(byDefault.lines).toEqual(["#1=IFCWALL", "#2=IFCMYELEMENT"]);
 });
 
 test("ELEMENT_TYPES and SPATIAL_TYPES cover every IfcProduct of every schema", () => {
@@ -882,7 +889,11 @@ test("spatialTypes decides what is shared across every group", async () => {
     ["#1=IFCWALL", "#3=IFCBUILDINGSTOREY"],
     ["#2=IFCWALL", "#3=IFCBUILDINGSTOREY"],
   ]);
-  expect(none).toEqual([["#1=IFCWALL"], ["#2=IFCWALL"]]);
+  // not shared: the storey is no longer in every file, only in the first
+  expect(none).toEqual([
+    ["#1=IFCWALL", "#3=IFCBUILDINGSTOREY"],
+    ["#2=IFCWALL"],
+  ]);
 });
 
 test("listArgIndex returning undefined skips the type entirely", async () => {
@@ -921,10 +932,9 @@ test("listArgIndex returning undefined skips the type entirely", async () => {
     "#3=IFCPROPERTYSINGLEVALUE",
     "#4=IFCRELDEFINESBYPROPERTIES",
   ]);
-  expect(
-    skipped,
-    "Dropping the relation drops everything it pulled in",
-  ).toEqual(["#1=IFCWALL"]);
+  // A relationship that is not rewritten is not filtered per file; as a line no
+  // group took it still goes, unchanged, into the first file.
+  expect(skipped).toEqual(byDefault);
 });
 
 test("split releases every output writer when the write pass fails", async () => {
@@ -1131,7 +1141,7 @@ test("split ifc", async () => {
     {
       elementCount: 152,
       rewrittenLines: 555,
-      totalIds: 9287,
+      totalIds: 10402,
     },
     {
       elementCount: 147,

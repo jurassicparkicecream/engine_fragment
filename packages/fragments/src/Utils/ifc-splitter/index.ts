@@ -737,8 +737,6 @@ class LineIndex {
   specialRaws: Map<number, string> = new Map();
   /** GlobalIds of the lines the parser was asked to remember (elements). */
   guids: Map<number, string> = new Map();
-  /** Ids of the lines whose first attribute is a GlobalId (IfcRoot). */
-  rootIds: number[] = [];
 
   private _refBuf: Int32Array = new Int32Array(4 * 1024 * 1024);
   private _refBufUsed: number = 0;
@@ -825,7 +823,6 @@ class LineIndex {
     (this as any)._refLen = null;
     (this as any).specialRaws = null;
     (this as any).guids = null;
-    (this as any).rootIds = null;
   }
 }
 
@@ -866,6 +863,20 @@ export class IdSet implements Iterable<number> {
       this.count++;
     }
     return this;
+  }
+
+  /** Adds every id of `other` (same `maxId`). */
+  addAll(other: IdSet): void {
+    for (let word = 0; word < this.bits.length; word++) {
+      const added = other.bits[word] & ~this.bits[word];
+      if (added === 0) continue;
+      this.bits[word] |= added;
+      let n = added;
+      while (n !== 0) {
+        n &= n - 1;
+        this.count++;
+      }
+    }
   }
 
   delete(id: number): boolean {
@@ -1976,12 +1987,17 @@ export class IfcSplitter {
       });
     }
 
-    // 8b. Objects with a GlobalId that no group took (an unused type, a file
-    // without any element): the first group gets them, so nothing is lost.
-    const leftovers = index.rootIds.filter(
-      (id) =>
-        !crossPartIds.has(id) && !groupsData.some((d) => d.fileIds.has(id)),
-    );
+    // 8b. Lines no group took – an unused type, a file without any element,
+    // an exporter's unreferenced placement: the first group gets them, so the
+    // parts together hold every line of the source.
+    const taken = new IdSet(index.maxId);
+    for (const data of groupsData) taken.addAll(data.fileIds);
+    const leftovers: number[] = [];
+    for (let id = 0; id <= index.maxId; id++) {
+      if (index.has(id) && !taken.has(id) && !crossPartIds.has(id)) {
+        leftovers.push(id);
+      }
+    }
     if (leftovers.length > 0) {
       let first = groupsData[0];
       if (!first) {
@@ -2334,9 +2350,6 @@ export class IfcSplitter {
     const remember = (id: number, type: string, raw: string) => {
       if (this.config.elementTypes.has(type)) {
         index.guids.set(id, guidOfRaw(raw));
-      }
-      if (/^#\d+\s*=\s*\w+\s*\(\s*'[0-9A-Za-z_$]{22}'/.test(raw)) {
-        index.rootIds.push(id);
       }
     };
 
