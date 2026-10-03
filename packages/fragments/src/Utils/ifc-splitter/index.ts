@@ -1129,6 +1129,36 @@ function describeCrossPartRelation(
   };
 }
 
+/**
+ * Removes `/* … *\/` comments, which ISO 10303-21 allows between and inside
+ * entity instances. Without this a comment line was glued to the next
+ * instance, which then no longer started with `#` and was dropped. `state`
+ * carries a comment across lines; quoted strings are respected.
+ */
+function stripComments(line: string, state: { inComment: boolean }): string {
+  if (!state.inComment && !line.includes("/*")) return line;
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (state.inComment) {
+      if (c === "*" && line[i + 1] === "/") {
+        state.inComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (c === "'") inString = !inString;
+    if (!inString && c === "/" && line[i + 1] === "*") {
+      state.inComment = true;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 function addToSetMap(
   map: Map<number, Set<number>>,
   key: number,
@@ -1980,6 +2010,7 @@ export class IfcSplitter {
 
       let section: "header" | "data" | "footer" = "header";
       let accumulator = "";
+      const comments = { inComment: false };
 
       await this.forEachLine(inputPath, async (line: string) => {
         if (section === "header") {
@@ -1987,7 +2018,8 @@ export class IfcSplitter {
           return;
         }
         if (section === "data") {
-          const trimmed = line.trim();
+          const trimmed = stripComments(line, comments).trim();
+          if (!trimmed) return;
           if (trimmed === "ENDSEC;") {
             if (accumulator) {
               await emitExtractLine(
@@ -2047,6 +2079,7 @@ export class IfcSplitter {
 
     let section: "header" | "data" | "footer" = "header";
     let accumulator = "";
+    const comments = { inComment: false };
     let lineCount = 0;
 
     await this.forEachLine(filePath, (line: string) => {
@@ -2056,7 +2089,8 @@ export class IfcSplitter {
         return;
       }
       if (section === "data") {
-        const trimmed = line.trim();
+        const trimmed = stripComments(line, comments).trim();
+        if (!trimmed) return;
         if (trimmed === "ENDSEC;") {
           if (accumulator) {
             const info = extractLineMeta(accumulator);
@@ -2120,6 +2154,7 @@ export class IfcSplitter {
 
     let section: "header" | "data" | "footer" = "header";
     let accumulator = "";
+    const comments = { inComment: false };
     let closed = false;
 
     try {
@@ -2129,7 +2164,8 @@ export class IfcSplitter {
           return;
         }
         if (section === "data") {
-          const trimmed = line.trim();
+          const trimmed = stripComments(line, comments).trim();
+          if (!trimmed) return;
           if (trimmed === "ENDSEC;") {
             if (accumulator) {
               await emitSplitLine(writers, accumulator, groupsData, idGroups);

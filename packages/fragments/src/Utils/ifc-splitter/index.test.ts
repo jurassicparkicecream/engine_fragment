@@ -580,6 +580,28 @@ test("split keeps entities that only reference backwards into every file that ho
   );
 });
 
+test("split and extract ignore comments in the data section", async () => {
+  const source = ifcOf([
+    "/* the first wall ------------------------------------------------- */",
+    "#1=IFCWALL('guid1',$,$,$,$,$,$,$,$); /* trailing comment with #99 */",
+    "/* a comment spanning",
+    "   two lines */",
+    "#2=IFCWALL('guid2',$,'/* not a comment */',$,$,$,$,$,$);",
+  ]);
+  const io = new MemoryIO(source);
+  const splitter = new IfcSplitter(io);
+  await splitter.split("in.ifc", 2, (g) => `out_${g}.ifc`);
+  const lines = [...io.sinks.values()].map(({ text }) => text).join("\n");
+  expect(lines).toContain("#1=IFCWALL('guid1',$,$,$,$,$,$,$,$);");
+  expect(lines).toContain(
+    "#2=IFCWALL('guid2',$,'/* not a comment */',$,$,$,$,$,$);",
+  );
+  expect(lines).not.toContain("#99");
+
+  const extracted = await splitter.extract("in.ifc", [2], "one.ifc");
+  expect([...extracted]).toEqual([2]);
+});
+
 test("spatialTypes decides what is shared across every group", async () => {
   const source = syntheticIfc(["IFCWALL", "IFCWALL", "IFCBUILDINGSTOREY"]);
   const [byDefault, none] = await Promise.all(
