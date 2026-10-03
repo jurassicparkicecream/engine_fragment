@@ -204,10 +204,20 @@ test("ELEMENT_TYPES and SPATIAL_TYPES cover every IfcProduct of every schema", (
   const missingElements = new Set<string>();
   const missingSpatial = new Set<string>();
   for (const schema of subtypesBySchema) {
-    const spatial = subtypes(schema, WEBIFC.IFCSPATIALSTRUCTUREELEMENT);
+    // shared: the spatial structure (except IfcSpace), grids, positioning
+    // elements and alignment layouts (IFC4X3)
+    const shared = new Set([
+      ...subtypes(schema, WEBIFC.IFCSPATIALSTRUCTUREELEMENT),
+      ...subtypes(schema, WEBIFC.IFCPOSITIONINGELEMENT),
+      ...subtypes(schema, WEBIFC.IFCLINEARELEMENT),
+      "IFCPOSITIONINGELEMENT",
+      "IFCLINEARELEMENT",
+      "IFCGRID",
+    ]);
+    shared.delete("IFCSPACE");
     for (const name of subtypes(schema, WEBIFC.IFCPRODUCT)) {
       if (abstract.has(name)) continue;
-      if (spatial.has(name) && name !== "IFCSPACE") {
+      if (shared.has(name)) {
         if (!SPATIAL_TYPES.includes(name as never)) missingSpatial.add(name);
       } else if (!ELEMENT_TYPES.includes(name as never)) {
         missingElements.add(name);
@@ -763,6 +773,95 @@ test("split attaches currency and material classification relationships (IFC4)",
       "#11=IFCCURRENCYRELATIONSHIP",
     ]),
   );
+});
+
+test("split records space boundaries whose corresponding boundary lies in another file", async () => {
+  const source = [
+    "ISO-10303-21;",
+    "HEADER;",
+    "FILE_SCHEMA(('IFC4'));",
+    "ENDSEC;",
+    "DATA;",
+    "#1=IFCSPACE('guid1',$,$,$,$,$,$,$,.ELEMENT.,$,$);",
+    "#2=IFCSPACE('guid2',$,$,$,$,$,$,$,.ELEMENT.,$,$);",
+    "#3=IFCWALL('guid3',$,$,$,$,$,$,$,$);",
+    // keeps space 1 and the wall in one file
+    "#4=IFCRELAGGREGATES('guid4',$,$,$,#1,(#3));",
+    "#10=IFCRELSPACEBOUNDARY2NDLEVEL('guid10',$,$,$,#1,#3,#20,.PHYSICAL.,.INTERNAL.,$,#11);",
+    "#11=IFCRELSPACEBOUNDARY2NDLEVEL('guid11',$,$,$,#2,#3,#21,.PHYSICAL.,.INTERNAL.,$,#10);",
+    "#20=IFCCONNECTIONSURFACEGEOMETRY(#22,$);",
+    "#21=IFCCONNECTIONSURFACEGEOMETRY(#22,$);",
+    "#22=IFCCARTESIANPOINT((0.,0.,0.));",
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+  const io = new MemoryIO(source);
+  const splitter = new IfcSplitter(io);
+  const onCrossPart = vi.fn<(event: IfcSplitterCrossPartEvent) => unknown>();
+  splitter.onCrossPartRelations.add(onCrossPart);
+  await splitter.split("in.ifc", 2, (g) => `out_${g}.ifc`);
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  expect(files).toHaveLength(2);
+  for (const text of files) expect(danglingRefs(text)).toEqual([]);
+
+  const { relations } = onCrossPart.mock.calls[0][0];
+  expect(relations.map((r) => r.expressId)).toEqual([10, 11]);
+  expect(relations[0].references).toEqual([
+    {
+      attribute: 10,
+      guid: "guid11",
+      expressId: 11,
+      type: "IFCRELSPACEBOUNDARY2NDLEVEL",
+    },
+  ]);
+  expect(relations[0].subgraph).toEqual([
+    "#20=IFCCONNECTIONSURFACEGEOMETRY(#22,$);",
+    "#22=IFCCARTESIANPOINT((0.,0.,0.));",
+  ]);
+});
+
+test("split keeps elements that reference each other directly in one file", async () => {
+  // IFC2X3 IfcStructuralAction.CausedBy points at a reaction
+  const source = ifcOf([
+    "#1=IFCSTRUCTURALPOINTREACTION('guid1',$,$,$,$,$,$,$,$,.LOCAL_COORDS.);",
+    "#2=IFCSTRUCTURALPOINTACTION('guid2',$,$,$,$,$,$,$,$,.LOCAL_COORDS.,.F.,#1);",
+    "#3=IFCWALL('guid3',$,$,$,$,$,$,$,$);",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 3, (g) => `out_${g}.ifc`);
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  for (const text of files) expect(danglingRefs(text)).toEqual([]);
+  expect(files.some((t) => t.includes("#1=") && t.includes("#2="))).toBe(true);
+});
+
+test("split writes positioning elements and IfcRelPositions into every file", async () => {
+  const source = [
+    "ISO-10303-21;",
+    "HEADER;",
+    "FILE_SCHEMA(('IFC4X3_ADD2'));",
+    "ENDSEC;",
+    "DATA;",
+    "#1=IFCREFERENT('guid1',$,$,$,$,$,$,.STATION.);",
+    "#10=IFCWALL('guid10',$,$,$,$,$,$,$,$);",
+    "#11=IFCWALL('guid11',$,$,$,$,$,$,$,$);",
+    "#20=IFCRELPOSITIONS('guid20',$,$,$,#1,(#10,#11));",
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+  const io = new MemoryIO(source);
+  const splitter = new IfcSplitter(io);
+  const onCrossPart = vi.fn<(event: IfcSplitterCrossPartEvent) => unknown>();
+  splitter.onCrossPartRelations.add(onCrossPart);
+  await splitter.split("in.ifc", 2, (g) => `out_${g}.ifc`);
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  expect(files).toHaveLength(2);
+  for (const text of files) {
+    expect(text).toContain("#1=IFCREFERENT");
+    expect(text).toMatch(
+      /#20=IFCRELPOSITIONS\('guid20',\$,\$,\$,#1,\(#1[01]\)\);/,
+    );
+  }
+  expect(onCrossPart.mock.calls[0][0].relations).toEqual([]);
 });
 
 test("spatialTypes decides what is shared across every group", async () => {

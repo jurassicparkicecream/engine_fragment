@@ -165,6 +165,26 @@ export interface IfcSplitterCrossPartRelation {
   /** The relationship's attributes as written in the source (`#id` refers to the source). */
   attributes: string[];
   ends: IfcSplitterRelationEnd[];
+  /**
+   * References to other relationships (e.g. `ParentBoundary` and
+   * `CorrespondingBoundary` of a space boundary), by GlobalId.
+   */
+  references: IfcSplitterRelationReference[];
+  /**
+   * The source lines the non-element attributes need (e.g. a
+   * `ConnectionGeometry` and everything it references), with their source
+   * express ids. Owner history and the elements themselves are left out.
+   */
+  subgraph: string[];
+}
+
+/** A reference from a cross-part relationship to another relationship. */
+export interface IfcSplitterRelationReference {
+  attribute: number;
+  position?: number;
+  guid: string;
+  expressId: number;
+  type: string;
 }
 
 export interface IfcSplitterCrossPartEvent {
@@ -200,8 +220,9 @@ interface RelEntry {
  *
  * Every subtype of IfcProduct in IFC2X3, IFC4 and IFC4X3 except the spatial
  * structure ({@link SPATIAL_TYPES}, which every file shares), with IfcSpace
- * included: building elements, but also annotations, grids, ports,
- * structural analysis items, spatial zones and IFC4X3 alignments. Anything not
+ * included: building elements, but also annotations, ports, structural
+ * analysis items and spatial zones. Grids and IFC4X3 positioning elements are
+ * shared like the spatial structure ({@link SPATIAL_TYPES}). Anything not
  * listed here is not split; unless a structure relationship lists it, it is
  * not written to any output file either. The test suite checks this list
  * against the schema tables of web-ifc.
@@ -388,22 +409,11 @@ export const ELEMENT_TYPES = Object.freeze([
   "IFCVOIDINGFEATURE",
   "IFCWASTETERMINAL",
   // The remaining IfcProduct subtypes that are not spatial structure:
-  // annotations, grids, ports, structural analysis items, spatial zones,
-  // IFC4X3 alignments and referents
-  "IFCALIGNMENT",
-  "IFCALIGNMENTCANT",
-  "IFCALIGNMENTHORIZONTAL",
-  "IFCALIGNMENTSEGMENT",
-  "IFCALIGNMENTVERTICAL",
+  // annotations, ports, structural analysis items and spatial zones
   "IFCANNOTATION",
   "IFCELEMENT",
   "IFCEXTERNALSPATIALELEMENT",
-  "IFCGRID",
-  "IFCLINEARELEMENT",
-  "IFCLINEARPOSITIONINGELEMENT",
   "IFCPORT",
-  "IFCPOSITIONINGELEMENT",
-  "IFCREFERENT",
   "IFCSPATIALZONE",
   "IFCSTRUCTURALACTION",
   "IFCSTRUCTURALACTIVITY",
@@ -450,8 +460,21 @@ export const SPATIAL_TYPES = Object.freeze([
   "IFCRAILWAY",
   "IFCRAILWAYPART",
   "IFCROAD",
-  "IFCROADPART", // a project library is a context like IfcProject
+  "IFCROADPART",
+  // a project library is a context like IfcProject
   "IFCPROJECTLIBRARY",
+  // grids and IFC4X3 positioning elements place products in every file
+  // (IfcRelPositions, IfcLinearPlacement)
+  "IFCGRID",
+  "IFCPOSITIONINGELEMENT",
+  "IFCLINEARPOSITIONINGELEMENT",
+  "IFCALIGNMENT",
+  "IFCALIGNMENTCANT",
+  "IFCALIGNMENTHORIZONTAL",
+  "IFCALIGNMENTSEGMENT",
+  "IFCALIGNMENTVERTICAL",
+  "IFCLINEARELEMENT",
+  "IFCREFERENT",
 ] as const);
 
 /**
@@ -694,7 +717,8 @@ function attachBackward(
       const refs = index.getRefs(entry.id);
       if (refs) {
         for (const r of refs) {
-          if (dropped.has(r) || allElementIds.has(r)) continue;
+          if (dropped.has(r) || allElementIds.has(r) || index.isRel(r))
+            continue;
           collectDeps(r, index, fileIds, allElementIds);
         }
       }
@@ -779,6 +803,10 @@ class LineIndex {
     return this.specialRaws.get(id);
   }
 
+  isRel(id: number): boolean {
+    return this.types[id]?.startsWith("IFCREL") ?? false;
+  }
+
   getAll(types: Set<string>) {
     const allElementIds = new Set<number>();
     for (let id = 0; id <= this.maxId; id++) {
@@ -840,6 +868,13 @@ export class IdSet implements Iterable<number> {
     return this;
   }
 
+  delete(id: number): boolean {
+    if (!this.has(id)) return false;
+    this.bits[id >>> 5] &= ~(1 << (id & 31));
+    this.count--;
+    return true;
+  }
+
   clone(): IdSet {
     const copy = new IdSet(this.maxId);
     copy.bits.set(this.bits);
@@ -884,7 +919,43 @@ function collectDeps(
       const refId = refs[i];
       if (visited.has(refId)) continue;
       if (allElementIds.has(refId)) continue;
+      // A relationship is never a mere dependency: it is written by the
+      // relationship pass (or recorded as cross-part), and copying it here
+      // would bring in its references to elements of other files.
+      if (index.isRel(refId)) continue;
       stack.push(refId);
+    }
+  }
+}
+
+/**
+ * Removes from `fileIds` every relationship that references another
+ * relationship not in the file (e.g. a space boundary whose
+ * `CorrespondingBoundary` lies in another file), repeatedly, and reports them.
+ */
+function dropDanglingRelations(
+  relIds: number[],
+  index: LineIndex,
+  fileIds: IdSet,
+  rewrittenLines: Map<number, string>,
+  crossPartIds: Set<number>,
+): void {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of relIds) {
+      if (!fileIds.has(id)) continue;
+      const refs = index.getRefs(id);
+      if (!refs) continue;
+      for (const r of refs) {
+        if (r !== id && index.isRel(r) && !fileIds.has(r)) {
+          fileIds.delete(id);
+          rewrittenLines.delete(id);
+          crossPartIds.add(id);
+          changed = true;
+          break;
+        }
+      }
     }
   }
 }
@@ -1024,6 +1095,19 @@ function buildAggregateMap(
     }
   }
 
+  // Elements that reference each other directly, not through a relationship
+  // (IFC2X3 IfcStructuralAction.CausedBy), must share a file, too.
+  for (const eid of allElementIds) {
+    const refs = index.getRefs(eid);
+    if (!refs) continue;
+    for (const r of refs) {
+      if (r === eid || !allElementIds.has(r)) continue;
+      if (!parentToChildren.has(eid)) parentToChildren.set(eid, new Set());
+      parentToChildren.get(eid)!.add(r);
+      if (!childToParent.has(r)) childToParent.set(r, eid);
+    }
+  }
+
   return { parentToChildren, childToParent, aggregateRelIds };
 }
 
@@ -1128,7 +1212,8 @@ function collectRelDeps(
   const dropped = new Set(listRefs);
   for (const r of kept) dropped.delete(r);
   for (const rid of refs) {
-    if (allElementIds.has(rid) || dropped.has(rid)) continue;
+    if (allElementIds.has(rid) || dropped.has(rid) || index.isRel(rid))
+      continue;
     collectDeps(rid, index, fileIds, allElementIds);
   }
 }
@@ -1166,14 +1251,31 @@ function describeCrossPartRelation(
   index: LineIndex,
   allElementIds: Set<number>,
   groupOf: (id: number) => number | null,
+  subgraphIdsOut: Map<number, number[]>,
 ): IfcSplitterCrossPartRelation {
   const raw = index.getRaw(relId);
   const args = splitIfcArgs(extractArgsString(raw) ?? "");
   const ends: IfcSplitterRelationEnd[] = [];
+  const references: IfcSplitterRelationReference[] = [];
+  const subgraphIds: number[] = [];
   args.forEach((arg, attribute) => {
     const isList = arg.trimStart().startsWith("(");
     extractRefs(arg).forEach((expressId, position) => {
-      if (!allElementIds.has(expressId)) return;
+      if (index.isRel(expressId)) {
+        references.push({
+          attribute,
+          ...(isList ? { position } : {}),
+          guid: guidOfRaw(index.getRaw(expressId)),
+          expressId,
+          type: index.getType(expressId) ?? "",
+        });
+        return;
+      }
+      if (!allElementIds.has(expressId)) {
+        // attribute 1 is the owner history, shared by everything
+        if (attribute !== 1) subgraphIds.push(expressId);
+        return;
+      }
       ends.push({
         attribute,
         ...(isList ? { position } : {}),
@@ -1184,12 +1286,17 @@ function describeCrossPartRelation(
       });
     });
   });
+  const closure = new IdSet(index.maxId);
+  for (const id of subgraphIds) collectDeps(id, index, closure, allElementIds);
+  subgraphIdsOut.set(relId, [...closure]);
   return {
     type: index.getType(relId) ?? "",
     guid: guidOfRaw(raw),
     expressId: relId,
     attributes: args,
     ends,
+    references,
+    subgraph: [], // filled with the source lines after the write pass
   };
 }
 
@@ -1655,6 +1762,9 @@ export class IfcSplitter {
     const styleMapsStart = performance.now();
     const styleMaps = buildStyleMaps(index);
     const backward = backwardEntries(index, schemaFamily(header));
+    const relIds: number[] = [];
+    for (let id = 0; id <= index.maxId; id++)
+      if (index.isRel(id)) relIds.push(id);
     this.emitProgressEvent("style-maps", styleMapsStart);
 
     // 4. Identify all building elements
@@ -1847,6 +1957,13 @@ export class IfcSplitter {
 
       attachBackward(backward, fileIds, index, allElementIds, rewrittenLines);
       resolveStyles(fileIds, index, styleMaps, allElementIds);
+      dropDanglingRelations(
+        relIds,
+        index,
+        fileIds,
+        rewrittenLines,
+        crossPartIds,
+      );
 
       const totalIds = fileIds.size;
       groupsData.push({
@@ -1891,7 +2008,7 @@ export class IfcSplitter {
         const refs = index.getRefs(id);
         if (refs) {
           for (const r of refs) {
-            if (!allElementIds.has(r)) {
+            if (!allElementIds.has(r) && !index.isRel(r)) {
               collectDeps(r, index, first.fileIds, allElementIds);
             }
           }
@@ -1905,9 +2022,17 @@ export class IfcSplitter {
         first.rewrittenLines,
       );
       resolveStyles(first.fileIds, index, styleMaps, allElementIds);
+      dropDanglingRelations(
+        relIds,
+        index,
+        first.fileIds,
+        first.rewrittenLines,
+        crossPartIds,
+      );
       first.totalIds = first.fileIds.size;
     }
 
+    const subgraphIds = new Map<number, number[]>();
     const crossPartRelations = [...crossPartIds]
       .sort((a, b) => a - b)
       .map((id) =>
@@ -1916,12 +2041,12 @@ export class IfcSplitter {
           index,
           allElementIds,
           (eid) => groupOf.get(eid) ?? null,
+          subgraphIds,
         ),
       );
 
     this.emitProgressEvent("resolve", resolveStart);
     this.onSplitsResolved.trigger({ data: groupsData });
-    this.onCrossPartRelations.trigger({ relations: crossPartRelations });
 
     // Free the index to reclaim memory before the output pass
     const maxParsedId = index.maxId;
@@ -1941,6 +2066,8 @@ export class IfcSplitter {
       groupsData,
       idGroups,
     );
+    await this.fillSubgraphs(inputPath, crossPartRelations, subgraphIds);
+    this.onCrossPartRelations.trigger({ relations: crossPartRelations });
     if (crossPartRelationsPath !== undefined) {
       await this.writeCrossPartRelations(
         crossPartRelationsPath,
@@ -1994,6 +2121,9 @@ export class IfcSplitter {
     const styleMapsStart = performance.now();
     const styleMaps = buildStyleMaps(index);
     const backward = backwardEntries(index, schemaFamily(header));
+    const relIds: number[] = [];
+    for (let id = 0; id <= index.maxId; id++)
+      if (index.isRel(id)) relIds.push(id);
     this.emitProgressEvent("style-maps", styleMapsStart);
 
     const classifyStart = performance.now();
@@ -2111,16 +2241,21 @@ export class IfcSplitter {
     }
     attachBackward(backward, fileIds, index, allElementIds, rewrittenLines);
     resolveStyles(fileIds, index, styleMaps, allElementIds);
+    dropDanglingRelations(relIds, index, fileIds, rewrittenLines, crossPartIds);
 
+    const subgraphIds = new Map<number, number[]>();
     const crossPartRelations = [...crossPartIds]
       .sort((a, b) => a - b)
       .map((id) =>
-        describeCrossPartRelation(id, index, allElementIds, (eid) =>
-          groupElementIds.has(eid) ? 0 : null,
+        describeCrossPartRelation(
+          id,
+          index,
+          allElementIds,
+          (eid) => (groupElementIds.has(eid) ? 0 : null),
+          subgraphIds,
         ),
       );
     this.emitProgressEvent("resolve", resolveStart);
-    this.onCrossPartRelations.trigger({ relations: crossPartRelations });
 
     // 7. Free index, write output
     index.free();
@@ -2177,6 +2312,8 @@ export class IfcSplitter {
       // Reading or writing may reject mid-stream; release the sink either way.
       if (!closed) await abortWriters([writer]);
     }
+    await this.fillSubgraphs(inputPath, crossPartRelations, subgraphIds);
+    this.onCrossPartRelations.trigger({ relations: crossPartRelations });
     if (crossPartRelationsPath !== undefined) {
       await this.writeCrossPartRelations(
         crossPartRelationsPath,
@@ -2358,6 +2495,52 @@ export class IfcSplitter {
       throw failure.reason;
     }
     return opened;
+  }
+
+  /**
+   * Reads the source lines of the cross-part relationships' subgraphs (one
+   * extra pass over the input, only if there are any).
+   */
+  protected async fillSubgraphs(
+    inputPath: string,
+    relations: IfcSplitterCrossPartRelation[],
+    subgraphIds: Map<number, number[]>,
+  ): Promise<void> {
+    const wanted = new Set<number>();
+    for (const ids of subgraphIds.values())
+      for (const id of ids) wanted.add(id);
+    if (wanted.size === 0) return;
+    const lines = new Map<number, string>();
+    let section: "header" | "data" | "footer" = "header";
+    let accumulator = "";
+    const comments = { inComment: false };
+    const take = (raw: string) => {
+      const info = extractLineMeta(raw);
+      if (info && wanted.has(info.id)) lines.set(info.id, raw);
+    };
+    await this.forEachLine(inputPath, (line: string) => {
+      if (section === "header") {
+        if (line.trim() === "DATA;") section = "data";
+        return;
+      }
+      if (section !== "data") return;
+      const trimmed = stripComments(line, comments).trim();
+      if (!trimmed) return;
+      if (trimmed === "ENDSEC;") {
+        section = "footer";
+        return;
+      }
+      accumulator += (accumulator ? " " : "") + trimmed;
+      if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
+        take(accumulator);
+        accumulator = "";
+      }
+    });
+    for (const relation of relations) {
+      relation.subgraph = (subgraphIds.get(relation.expressId) ?? [])
+        .sort((a, b) => a - b)
+        .flatMap((id) => (lines.has(id) ? [lines.get(id)!] : []));
+    }
   }
 
   /**
