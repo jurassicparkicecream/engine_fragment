@@ -198,12 +198,13 @@ interface RelEntry {
  * The default {@link IfcSplitterConfig.elementTypes}.
  * Exported so it can be extended rather than replaced.
  *
- * Every subtype of IfcElement in IFC2X3, IFC4 and IFC4X3, plus three
- * products that are not IfcElements but carry their own geometry or belong to
- * one: IFCSPACE, IFCDISTRIBUTIONPORT and IFCPROXY. Anything not listed here is
- * neither split nor copied into any output file, so a missing type silently
- * drops all of its instances. The test suite checks this list against the
- * schema tables of web-ifc.
+ * Every subtype of IfcProduct in IFC2X3, IFC4 and IFC4X3 except the spatial
+ * structure ({@link SPATIAL_TYPES}, which every file shares), with IfcSpace
+ * included: building elements, but also annotations, grids, ports,
+ * structural analysis items, spatial zones and IFC4X3 alignments. Anything not
+ * listed here is not split; unless a structure relationship lists it, it is
+ * not written to any output file either. The test suite checks this list
+ * against the schema tables of web-ifc.
  */
 export const ELEMENT_TYPES = Object.freeze([
   "IFCWALL",
@@ -386,6 +387,47 @@ export const ELEMENT_TYPES = Object.freeze([
   "IFCVIBRATIONISOLATOR",
   "IFCVOIDINGFEATURE",
   "IFCWASTETERMINAL",
+  // The remaining IfcProduct subtypes that are not spatial structure:
+  // annotations, grids, ports, structural analysis items, spatial zones,
+  // IFC4X3 alignments and referents
+  "IFCALIGNMENT",
+  "IFCALIGNMENTCANT",
+  "IFCALIGNMENTHORIZONTAL",
+  "IFCALIGNMENTSEGMENT",
+  "IFCALIGNMENTVERTICAL",
+  "IFCANNOTATION",
+  "IFCELEMENT",
+  "IFCEXTERNALSPATIALELEMENT",
+  "IFCGRID",
+  "IFCLINEARELEMENT",
+  "IFCLINEARPOSITIONINGELEMENT",
+  "IFCPORT",
+  "IFCPOSITIONINGELEMENT",
+  "IFCREFERENT",
+  "IFCSPATIALZONE",
+  "IFCSTRUCTURALACTION",
+  "IFCSTRUCTURALACTIVITY",
+  "IFCSTRUCTURALCONNECTION",
+  "IFCSTRUCTURALCURVEACTION",
+  "IFCSTRUCTURALCURVECONNECTION",
+  "IFCSTRUCTURALCURVEMEMBER",
+  "IFCSTRUCTURALCURVEMEMBERVARYING",
+  "IFCSTRUCTURALCURVEREACTION",
+  "IFCSTRUCTURALITEM",
+  "IFCSTRUCTURALLINEARACTION",
+  "IFCSTRUCTURALLINEARACTIONVARYING",
+  "IFCSTRUCTURALMEMBER",
+  "IFCSTRUCTURALPLANARACTION",
+  "IFCSTRUCTURALPLANARACTIONVARYING",
+  "IFCSTRUCTURALPOINTACTION",
+  "IFCSTRUCTURALPOINTCONNECTION",
+  "IFCSTRUCTURALPOINTREACTION",
+  "IFCSTRUCTURALREACTION",
+  "IFCSTRUCTURALSURFACEACTION",
+  "IFCSTRUCTURALSURFACECONNECTION",
+  "IFCSTRUCTURALSURFACEMEMBER",
+  "IFCSTRUCTURALSURFACEMEMBERVARYING",
+  "IFCSTRUCTURALSURFACEREACTION",
 ] as const);
 
 /**
@@ -397,6 +439,19 @@ export const SPATIAL_TYPES = Object.freeze([
   "IFCSITE",
   "IFCBUILDING",
   "IFCBUILDINGSTOREY",
+  // IFC4X3 facilities and their parts are spatial structure, too
+  "IFCBRIDGE",
+  "IFCBRIDGEPART",
+  "IFCFACILITY",
+  "IFCFACILITYPART",
+  "IFCFACILITYPARTCOMMON",
+  "IFCMARINEFACILITY",
+  "IFCMARINEPART",
+  "IFCRAILWAY",
+  "IFCRAILWAYPART",
+  "IFCROAD",
+  "IFCROADPART", // a project library is a context like IfcProject
+  "IFCPROJECTLIBRARY",
 ] as const);
 
 /**

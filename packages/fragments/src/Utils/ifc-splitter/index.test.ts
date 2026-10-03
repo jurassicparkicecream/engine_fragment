@@ -165,9 +165,10 @@ const linesOf = (state: SinkState | undefined) =>
   [...state!.text.matchAll(/^#\d+=\w+/gm)].map(([line]) => line);
 
 test("elementTypes decides what counts as a splittable element", async () => {
-  const source = syntheticIfc(["IFCWALL", "IFCANNOTATION"]);
+  // A made-up type: every IfcProduct is in the defaults.
+  const source = syntheticIfc(["IFCWALL", "IFCMYELEMENT"]);
   const [byDefault, extended] = await Promise.all(
-    [undefined, { elementTypes: ["IFCANNOTATION"] }].map(async (config) => {
+    [undefined, { elementTypes: ["IFCMYELEMENT"] }].map(async (config) => {
       const io = new MemoryIO(source);
       await new IfcSplitter(io, config).split("in.ifc", 1, () => "out.ifc");
       return linesOf(io.sinks.get("out.ifc"));
@@ -175,10 +176,10 @@ test("elementTypes decides what counts as a splittable element", async () => {
   );
 
   expect(byDefault).toEqual(["#1=IFCWALL"]);
-  expect(extended).toEqual(["#2=IFCANNOTATION"]);
+  expect(extended).toEqual(["#2=IFCMYELEMENT"]);
 });
 
-test("ELEMENT_TYPES covers every IfcElement subtype of every schema", () => {
+test("ELEMENT_TYPES and SPATIAL_TYPES cover every IfcProduct of every schema", () => {
   // web-ifc exports one numeric constant per entity name; its schema tables
   // list the (transitive) subtypes of each entity per schema.
   const names = new Map<number, string>();
@@ -191,16 +192,30 @@ test("ELEMENT_TYPES covers every IfcElement subtype of every schema", () => {
     WEBIFC.InheritanceDef as Record<number, Record<number, number[]>>,
   );
   expect(subtypesBySchema.length).toBeGreaterThanOrEqual(3);
+  const subtypes = (schema: Record<number, number[]>, code: number) =>
+    new Set((schema[code] ?? []).map((c) => names.get(c)!));
 
-  const missing = new Set<string>();
-  for (const subtypes of subtypesBySchema) {
-    for (const code of subtypes[WEBIFC.IFCELEMENT] ?? []) {
-      const name = names.get(code);
-      expect(name, `type code ${code}`).toBeDefined();
-      if (!ELEMENT_TYPES.includes(name as never)) missing.add(name!);
+  // abstract supertypes of the spatial structure, never instantiated
+  const abstract = new Set([
+    "IFCSPATIALELEMENT",
+    "IFCSPATIALSTRUCTUREELEMENT",
+    "IFCEXTERNALSPATIALSTRUCTUREELEMENT",
+  ]);
+  const missingElements = new Set<string>();
+  const missingSpatial = new Set<string>();
+  for (const schema of subtypesBySchema) {
+    const spatial = subtypes(schema, WEBIFC.IFCSPATIALSTRUCTUREELEMENT);
+    for (const name of subtypes(schema, WEBIFC.IFCPRODUCT)) {
+      if (abstract.has(name)) continue;
+      if (spatial.has(name) && name !== "IFCSPACE") {
+        if (!SPATIAL_TYPES.includes(name as never)) missingSpatial.add(name);
+      } else if (!ELEMENT_TYPES.includes(name as never)) {
+        missingElements.add(name);
+      }
     }
   }
-  expect([...missing]).toEqual([]);
+  expect([...missingElements]).toEqual([]);
+  expect([...missingSpatial]).toEqual([]);
 });
 
 // Regression: these were missing from ELEMENT_TYPES, so split and extract
