@@ -472,6 +472,8 @@ export const listIdxByType = (type: string): number => {
     case "IFCRELCOVERSSPACES":
     case "IFCRELPOSITIONS":
     case "IFCRELADHERESTOELEMENT":
+    case "IFCRELDECLARES":
+    case "IFCRELSERVICESBUILDINGS":
       return 5;
     case "IFCRELCONNECTSELEMENTS":
     case "IFCRELCONNECTSPATHELEMENTS":
@@ -559,12 +561,14 @@ const BACKWARD_ATTACHMENTS: Readonly<
   },
   IFC4: {
     IFCAPPROVALRELATIONSHIP: [2, 3],
+    IFCCURRENCYRELATIONSHIP: [2, 3],
     IFCDOCUMENTINFORMATIONRELATIONSHIP: [2, 3],
     IFCEXTERNALREFERENCERELATIONSHIP: [2, 3],
     IFCGEOMETRICREPRESENTATIONSUBCONTEXT: [6],
     IFCINDEXEDCOLOURMAP: [0],
     IFCINDEXEDTRIANGLETEXTUREMAP: [0, 1],
     IFCMAPCONVERSION: [0],
+    IFCMATERIALCLASSIFICATIONRELATIONSHIP: [1],
     IFCMATERIALPROPERTIES: [3],
     IFCMATERIALRELATIONSHIP: [2, 3],
     IFCORGANIZATIONRELATIONSHIP: [2, 3],
@@ -580,6 +584,7 @@ const BACKWARD_ATTACHMENTS: Readonly<
   },
   IFC4X3: {
     IFCAPPROVALRELATIONSHIP: [2, 3],
+    IFCCURRENCYRELATIONSHIP: [2, 3],
     IFCDOCUMENTINFORMATIONRELATIONSHIP: [2, 3],
     IFCEXTERNALREFERENCERELATIONSHIP: [2, 3],
     IFCGEOMETRICREPRESENTATIONSUBCONTEXT: [6],
@@ -588,6 +593,7 @@ const BACKWARD_ATTACHMENTS: Readonly<
     IFCINDEXEDTRIANGLETEXTUREMAP: [0, 1],
     IFCMAPCONVERSION: [0],
     IFCMAPCONVERSIONSCALED: [0],
+    IFCMATERIALCLASSIFICATIONRELATIONSHIP: [1],
     IFCMATERIALPROPERTIES: [3],
     IFCMATERIALRELATIONSHIP: [2, 3],
     IFCORGANIZATIONRELATIONSHIP: [2, 3],
@@ -1785,12 +1791,16 @@ export class IfcSplitter {
       resolveStyles(fileIds, index, styleMaps, allElementIds);
 
       const rewrittenLines = new Map<number, string>();
-      // Two passes: the second also keeps non-element objects that the first
-      // brought into the file, e.g. the type objects of the group's elements,
-      // so their material and property relationships are not dropped.
-      for (const pass of [1, 2])
+      // Pass 1 keeps the group's own objects. Later passes also keep
+      // non-element objects already in the file (e.g. the type objects of the
+      // group's elements, a superior system), and repeat until nothing
+      // changes, because a kept relationship can bring in an object that an
+      // earlier listed relationship needs.
+      const crossedHere = new Set<number>();
+      for (let pass = 1; ; pass++) {
+        const before = fileIds.size;
         for (const rel of relEntries) {
-          if (crossPartIds.has(rel.id)) continue;
+          if (crossedHere.has(rel.id)) continue;
           // Keep this group's elements, the shared spatial structure (present in
           // every file) and the non-element objects this group has claimed.
           const filtered = rel.listRefs.filter(
@@ -1798,7 +1808,7 @@ export class IfcSplitter {
               groupElementIds.has(r) ||
               sharedIds.has(r) ||
               claimedBy.get(r) === g ||
-              (pass === 2 && !allElementIds.has(r) && fileIds.has(r)),
+              (pass > 1 && !allElementIds.has(r) && fileIds.has(r)),
           );
           if (filtered.length === 0) continue;
           if (
@@ -1812,6 +1822,7 @@ export class IfcSplitter {
             )
           ) {
             crossPartIds.add(rel.id);
+            crossedHere.add(rel.id);
             continue;
           }
           const newArgs = [...rel.args];
@@ -1831,6 +1842,8 @@ export class IfcSplitter {
             allElementIds,
           );
         }
+        if (pass > 1 && fileIds.size === before) break;
+      }
 
       attachBackward(backward, fileIds, index, allElementIds, rewrittenLines);
       resolveStyles(fileIds, index, styleMaps, allElementIds);
@@ -2092,7 +2105,10 @@ export class IfcSplitter {
       }
     }
     resolveStyles(fileIds, index, styleMaps, allElementIds);
-    rewriteRelations(true);
+    for (let before = -1; fileIds.size !== before; ) {
+      before = fileIds.size;
+      rewriteRelations(true);
+    }
     attachBackward(backward, fileIds, index, allElementIds, rewrittenLines);
     resolveStyles(fileIds, index, styleMaps, allElementIds);
 

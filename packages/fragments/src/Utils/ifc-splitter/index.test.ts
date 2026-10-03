@@ -646,6 +646,125 @@ test("split keeps objects that no group takes in the first file", async () => {
   ]);
 });
 
+test("split filters IfcRelDeclares by its definitions and keeps IfcRelServicesBuildings everywhere", async () => {
+  const source = ifcOf([
+    "#1=IFCPROJECT('guid1',$,$,$,$,$,$,$,$);",
+    "#2=IFCBUILDING('guid2',$,$,$,$,$,$,$,.ELEMENT.,$,$,$);",
+    "#10=IFCWALL('guid10',$,$,$,$,$,$,$,$);",
+    "#11=IFCWALLTYPE('guid11',$,'A',$,$,$,$,$,$,.STANDARD.);",
+    "#12=IFCRELDEFINESBYTYPE('guid12',$,$,$,(#10),#11);",
+    "#20=IFCSLAB('guid20',$,$,$,$,$,$,$,$);",
+    "#21=IFCSLABTYPE('guid21',$,'B',$,$,$,$,$,$,.FLOOR.);",
+    "#22=IFCRELDEFINESBYTYPE('guid22',$,$,$,(#20),#21);",
+    // RelatedDefinitions is argument 5
+    "#30=IFCRELDECLARES('guid30',$,$,$,#1,(#11,#21));",
+    "#40=IFCSYSTEM('guid40',$,'Heating',$,$);",
+    "#41=IFCRELASSIGNSTOGROUP('guid41',$,$,$,(#20),$,#40);",
+    // RelatedBuildings is argument 5
+    "#42=IFCRELSERVICESBUILDINGS('guid42',$,$,$,#40,(#2));",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 2, (g) => `out_${g}.ifc`);
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  const wall = files.find((text) => text.includes("#10=IFCWALL"))!;
+  const slab = files.find((text) => text.includes("#20=IFCSLAB"))!;
+  expect(wall).not.toBe(slab);
+  expect(wall).toContain("#30=IFCRELDECLARES('guid30',$,$,$,#1,(#11));");
+  expect(wall).not.toContain("#21=IFCSLABTYPE");
+  expect(slab).toContain("#30=IFCRELDECLARES('guid30',$,$,$,#1,(#21));");
+  expect(slab).toContain("#42=IFCRELSERVICESBUILDINGS");
+  for (const text of files) expect(danglingRefs(text)).toEqual([]);
+});
+
+test("split follows chains of non-element objects regardless of line order", async () => {
+  // Listed in reverse: the property set of the superior system comes first,
+  // the relationship that brings that system in second.
+  const source = ifcOf([
+    "#1=IFCPROPERTYSET('guid1',$,'Pset_System',$,());",
+    "#2=IFCRELDEFINESBYPROPERTIES('guid2',$,$,$,(#21),#1);",
+    "#3=IFCRELAGGREGATES('guid3',$,$,$,#21,(#20));",
+    "#4=IFCRELASSIGNSTOGROUP('guid4',$,$,$,(#10,#11),$,#20);",
+    "#10=IFCPIPESEGMENT('guid10',$,$,$,$,$,$,$,$);",
+    "#11=IFCPIPESEGMENT('guid11',$,$,$,$,$,$,$,$);",
+    "#20=IFCDISTRIBUTIONSYSTEM('guid20',$,'Branch',$,$,$,$);",
+    "#21=IFCDISTRIBUTIONSYSTEM('guid21',$,'Main',$,$,$,$);",
+  ]);
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 2, (g) => `out_${g}.ifc`);
+  // Both pipes, and so both files, belong to the system hierarchy.
+  for (const state of io.sinks.values()) {
+    expect(linesOf(state)).toEqual(
+      expect.arrayContaining([
+        "#21=IFCDISTRIBUTIONSYSTEM",
+        "#3=IFCRELAGGREGATES",
+        "#2=IFCRELDEFINESBYPROPERTIES",
+        "#1=IFCPROPERTYSET",
+      ]),
+    );
+  }
+});
+
+test("split writes a relationship in the file of its single end even if it spans files elsewhere", async () => {
+  const source = ifcOf([
+    "#1=IFCPIPESEGMENT('guid1',$,$,$,$,$,$,$,$);",
+    "#2=IFCVALVE('guid2',$,$,$,$,$,$,$,$);",
+    // heavier than pipe and valve #2 together, so its file comes first
+    "#3=IFCVALVE('guid3',$,$,$,$,$,#30,$,$);",
+    "#30=IFCCARTESIANPOINT((1.,0.,0.),#31);",
+    "#31=IFCCARTESIANPOINT((2.,0.,0.),#32);",
+    "#32=IFCCARTESIANPOINT((3.,0.,0.));",
+    // both valves control the pipe; the pipe and valve #2 share a file
+    "#4=IFCRELFLOWCONTROLELEMENTS('guid4',$,$,$,(#2,#3),#1);",
+    // keeps pipe and valve #2 in one file
+    "#5=IFCRELAGGREGATES('guid5',$,$,$,#1,(#2));",
+  ]);
+  const io = new MemoryIO(source);
+  const splitter = new IfcSplitter(io);
+  const onCrossPart = vi.fn<(event: IfcSplitterCrossPartEvent) => unknown>();
+  splitter.onCrossPartRelations.add(onCrossPart);
+  await splitter.split("in.ifc", 2, (g) => `out_${g}.ifc`);
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  const withPipe = files.find((text) => text.includes("#1=IFCPIPESEGMENT"))!;
+  expect(withPipe).toContain("#2=IFCVALVE");
+  expect(withPipe).toContain(
+    "#4=IFCRELFLOWCONTROLELEMENTS('guid4',$,$,$,(#2),#1);",
+  );
+  expect(
+    onCrossPart.mock.calls[0][0].relations.map((r) => r.expressId),
+  ).toEqual([4]);
+});
+
+test("split attaches currency and material classification relationships (IFC4)", async () => {
+  const source = [
+    "ISO-10303-21;",
+    "HEADER;",
+    "FILE_SCHEMA(('IFC4'));",
+    "ENDSEC;",
+    "DATA;",
+    "#1=IFCWALL('guid1',$,$,$,$,$,$,$,$);",
+    "#2=IFCMATERIAL('Concrete',$,$);",
+    "#3=IFCRELASSOCIATESMATERIAL('guid3',$,$,$,(#1),#2);",
+    "#4=IFCCLASSIFICATIONREFERENCE($,'C30',$,$,$,$);",
+    "#5=IFCMATERIALCLASSIFICATIONRELATIONSHIP((#4),#2);",
+    "#6=IFCCOSTVALUE($,$,$,$,$,$,$,$,$,$);",
+    "#7=IFCMONETARYUNIT('EUR');",
+    "#8=IFCMONETARYUNIT('CHF');",
+    "#9=IFCUNITASSIGNMENT((#7));",
+    "#10=IFCPROJECT('guid10',$,$,$,$,$,$,$,#9);",
+    "#11=IFCCURRENCYRELATIONSHIP($,$,#7,#8,0.95,$,$);",
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 1, () => "out.ifc");
+  expect(linesOf(io.sinks.get("out.ifc"))).toEqual(
+    expect.arrayContaining([
+      "#5=IFCMATERIALCLASSIFICATIONRELATIONSHIP",
+      "#11=IFCCURRENCYRELATIONSHIP",
+    ]),
+  );
+});
+
 test("spatialTypes decides what is shared across every group", async () => {
   const source = syntheticIfc(["IFCWALL", "IFCWALL", "IFCBUILDINGSTOREY"]);
   const [byDefault, none] = await Promise.all(
