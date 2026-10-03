@@ -522,6 +522,64 @@ test("split keeps a connection whose elements share a file", async () => {
   );
 });
 
+test("split keeps entities that only reference backwards into every file that holds their target", async () => {
+  const source = [
+    "ISO-10303-21;",
+    "HEADER;",
+    "FILE_SCHEMA(('IFC4'));",
+    "ENDSEC;",
+    "DATA;",
+    "#1=IFCPROJECT('guid1',$,$,$,$,$,$,(#2),$);",
+    "#2=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,#3,$);",
+    "#3=IFCAXIS2PLACEMENT3D(#4,$,$);",
+    "#4=IFCCARTESIANPOINT((0.,0.,0.));",
+    // georeferencing: points at the context, nothing points at it
+    "#5=IFCMAPCONVERSION(#2,#6,1000.,2000.,0.,$,$,$);",
+    "#6=IFCPROJECTEDCRS('EPSG:25832',$,$,$,$,$,$);",
+    "#10=IFCWALL('guid10',$,$,$,$,$,#11,$,$);",
+    "#11=IFCPRODUCTDEFINITIONSHAPE($,$,(#12));",
+    "#12=IFCSHAPEREPRESENTATION(#2,'Body','Tessellation',(#13));",
+    "#13=IFCTRIANGULATEDFACESET(#14,$,$,((1,2,3)),$);",
+    "#14=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));",
+    "#15=IFCINDEXEDCOLOURMAP(#13,$,#16,(1));",
+    "#16=IFCCOLOURRGBLIST(((1.,0.,0.)));",
+    "#20=IFCWALL('guid20',$,$,$,$,$,#21,$,$);",
+    "#21=IFCPRODUCTDEFINITIONSHAPE($,$,(#22));",
+    "#22=IFCSHAPEREPRESENTATION(#2,'Body','Tessellation',(#23));",
+    "#23=IFCTRIANGULATEDFACESET(#14,$,$,((1,2,3)),$);",
+    // one layer for both walls: each file gets it with its own representation
+    "#30=IFCPRESENTATIONLAYERASSIGNMENT('Walls',$,(#12,#22),$);",
+    // a material associated with the walls' type object only
+    "#40=IFCWALLTYPE('guid40',$,$,$,$,$,$,$,$,.STANDARD.);",
+    "#41=IFCRELDEFINESBYTYPE('guid41',$,$,$,(#10,#20),#40);",
+    "#42=IFCMATERIAL('Concrete',$,$);",
+    "#43=IFCRELASSOCIATESMATERIAL('guid43',$,$,$,(#40),#42);",
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 2, (g) => `out_${g}.ifc`);
+
+  const files = [...io.sinks.values()].map(({ text }) => text);
+  expect(files).toHaveLength(2);
+  for (const text of files) {
+    expect(text).toContain("#5=IFCMAPCONVERSION");
+    expect(text).toContain("#6=IFCPROJECTEDCRS");
+    expect(text).toContain("#43=IFCRELASSOCIATESMATERIAL");
+    expect(danglingRefs(text)).toEqual([]);
+  }
+  const first = files.find((text) => text.includes("#10=IFCWALL"))!;
+  const second = files.find((text) => text.includes("#20=IFCWALL"))!;
+  expect(first).toContain("#15=IFCINDEXEDCOLOURMAP");
+  expect(second).not.toContain("#15=IFCINDEXEDCOLOURMAP");
+  expect(first).toContain(
+    "#30=IFCPRESENTATIONLAYERASSIGNMENT('Walls',$,(#12),$);",
+  );
+  expect(second).toContain(
+    "#30=IFCPRESENTATIONLAYERASSIGNMENT('Walls',$,(#22),$);",
+  );
+});
+
 test("spatialTypes decides what is shared across every group", async () => {
   const source = syntheticIfc(["IFCWALL", "IFCWALL", "IFCBUILDINGSTOREY"]);
   const [byDefault, none] = await Promise.all(
@@ -788,53 +846,53 @@ test("split ifc", async () => {
   ).toEqual([
     {
       elementCount: 152,
-      rewrittenLines: 550,
-      totalIds: 9208,
+      rewrittenLines: 555,
+      totalIds: 9287,
     },
     {
       elementCount: 147,
-      rewrittenLines: 539,
-      totalIds: 9180,
+      rewrittenLines: 545,
+      totalIds: 9277,
     },
     {
       elementCount: 155,
-      rewrittenLines: 573,
-      totalIds: 9272,
+      rewrittenLines: 579,
+      totalIds: 9367,
     },
     {
       elementCount: 160,
-      rewrittenLines: 589,
-      totalIds: 11421,
+      rewrittenLines: 595,
+      totalIds: 11522,
     },
     {
       elementCount: 155,
-      rewrittenLines: 569,
-      totalIds: 9262,
+      rewrittenLines: 577,
+      totalIds: 9361,
     },
     {
       elementCount: 154,
-      rewrittenLines: 571,
-      totalIds: 9279,
+      rewrittenLines: 577,
+      totalIds: 9376,
     },
     {
       elementCount: 159,
-      rewrittenLines: 576,
-      totalIds: 9310,
+      rewrittenLines: 583,
+      totalIds: 9405,
     },
     {
       elementCount: 159,
-      rewrittenLines: 575,
-      totalIds: 9309,
+      rewrittenLines: 583,
+      totalIds: 9408,
     },
     {
       elementCount: 155,
-      rewrittenLines: 572,
-      totalIds: 9262,
+      rewrittenLines: 578,
+      totalIds: 9356,
     },
     {
       elementCount: 155,
-      rewrittenLines: 569,
-      totalIds: 9271,
+      rewrittenLines: 574,
+      totalIds: 9364,
     },
   ]);
 
@@ -930,7 +988,9 @@ test("extract ifc", async () => {
   // 14576 before: objects listed next to #501 in a relationship (other types,
   // reinforcing bars sharing a material association) were copied in as plain
   // dependencies, unreferenced, together with their geometry.
-  expect(extractedIds.size).toBe(90);
+  // With the column's colour map (IfcIndexedColourMap) and layer assignment,
+  // which hang backwards on its geometry.
+  expect(extractedIds.size).toBe(94);
 
   expect(idsToExtract.every((id) => extractedIds.has(id))).toBeTruthy();
 

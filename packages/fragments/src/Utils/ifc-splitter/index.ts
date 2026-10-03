@@ -440,9 +440,207 @@ const shouldRewriteType = (type: string): boolean => {
   if (type === "IFCRELVOIDSELEMENT") return false;
   if (type === "IFCRELFILLSELEMENT") return false;
   if (type.startsWith("IFCREL")) return true;
-  if (type === "IFCPRESENTATIONLAYERASSIGNMENT") return true;
   return false;
 };
+
+type IfcSchemaFamily = "IFC2X3" | "IFC4" | "IFC4X3";
+
+const schemaFamily = (header: string[]): IfcSchemaFamily => {
+  const schema = header.find((line) => /FILE_SCHEMA/i.test(line)) ?? "";
+  if (/IFC2X3/i.test(schema)) return "IFC2X3";
+  if (/IFC4X3/i.test(schema)) return "IFC4X3";
+  return "IFC4";
+};
+
+/**
+ * Entity types that nothing references: they attach themselves to their target
+ * (the INVERSE side in the schema), so collecting forward references never
+ * reaches them. Per type, the attributes (STEP index) that point to the
+ * target. Generated from the EXPRESS schemas IFC2X3 TC1, IFC4 ADD2 TC1 and
+ * IFC4X3 ADD2: every non-abstract entity no explicit attribute can refer to,
+ * with the attribute named in the INVERSE clause that targets it, plus
+ * IfcShapeAspect, unused geometric subcontexts and the material/profile
+ * property sets. IfcRel* types,
+ * IfcStyledItem and IfcMaterialDefinitionRepresentation are handled elsewhere.
+ */
+const BACKWARD_ATTACHMENTS: Readonly<
+  Record<IfcSchemaFamily, Readonly<Record<string, readonly number[]>>>
+> = {
+  IFC2X3: {
+    IFCAPPLIEDVALUERELATIONSHIP: [0, 1],
+    IFCAPPROVALACTORRELATIONSHIP: [1],
+    IFCAPPROVALPROPERTYRELATIONSHIP: [0],
+    IFCAPPROVALRELATIONSHIP: [0, 1],
+    IFCCLASSIFICATIONITEMRELATIONSHIP: [0, 1],
+    IFCCONSTRAINTAGGREGATIONRELATIONSHIP: [2, 3],
+    IFCCONSTRAINTCLASSIFICATIONRELATIONSHIP: [0],
+    IFCCONSTRAINTRELATIONSHIP: [2, 3],
+    IFCCURRENCYRELATIONSHIP: [0, 1],
+    IFCDIMENSIONCALLOUTRELATIONSHIP: [2, 3],
+    IFCDIMENSIONPAIR: [2, 3],
+    IFCDOCUMENTINFORMATIONRELATIONSHIP: [0, 1],
+    IFCDRAUGHTINGCALLOUTRELATIONSHIP: [2, 3],
+    IFCEXTENDEDMATERIALPROPERTIES: [0],
+    IFCFUELPROPERTIES: [0],
+    IFCGENERALMATERIALPROPERTIES: [0],
+    IFCGEOMETRICREPRESENTATIONSUBCONTEXT: [6],
+    IFCHYGROSCOPICMATERIALPROPERTIES: [0],
+    IFCMATERIALCLASSIFICATIONRELATIONSHIP: [1],
+    IFCMECHANICALCONCRETEMATERIALPROPERTIES: [0],
+    IFCMECHANICALMATERIALPROPERTIES: [0],
+    IFCMECHANICALSTEELMATERIALPROPERTIES: [0],
+    IFCOPTICALMATERIALPROPERTIES: [0],
+    IFCORGANIZATIONRELATIONSHIP: [2, 3],
+    IFCPRESENTATIONLAYERASSIGNMENT: [2],
+    IFCPRESENTATIONLAYERWITHSTYLE: [2],
+    IFCPRODUCTSOFCOMBUSTIONPROPERTIES: [0],
+    IFCPROPERTYCONSTRAINTRELATIONSHIP: [0],
+    IFCPROPERTYDEPENDENCYRELATIONSHIP: [0, 1],
+    IFCREFERENCESVALUEDOCUMENT: [1],
+    IFCSHAPEASPECT: [0, 4],
+    IFCTHERMALMATERIALPROPERTIES: [0],
+    IFCTIMESERIESREFERENCERELATIONSHIP: [0],
+    IFCWATERPROPERTIES: [0],
+  },
+  IFC4: {
+    IFCAPPROVALRELATIONSHIP: [2, 3],
+    IFCDOCUMENTINFORMATIONRELATIONSHIP: [2, 3],
+    IFCEXTERNALREFERENCERELATIONSHIP: [2, 3],
+    IFCGEOMETRICREPRESENTATIONSUBCONTEXT: [6],
+    IFCINDEXEDCOLOURMAP: [0],
+    IFCINDEXEDTRIANGLETEXTUREMAP: [0, 1],
+    IFCMAPCONVERSION: [0],
+    IFCMATERIALPROPERTIES: [3],
+    IFCMATERIALRELATIONSHIP: [2, 3],
+    IFCORGANIZATIONRELATIONSHIP: [2, 3],
+    IFCPRESENTATIONLAYERASSIGNMENT: [2],
+    IFCPRESENTATIONLAYERWITHSTYLE: [2],
+    IFCPROFILEPROPERTIES: [3],
+    IFCPROPERTYDEPENDENCYRELATIONSHIP: [2, 3],
+    IFCRESOURCEAPPROVALRELATIONSHIP: [2, 3],
+    IFCRESOURCECONSTRAINTRELATIONSHIP: [2, 3],
+    IFCSHAPEASPECT: [0, 4],
+    IFCTEXTURECOORDINATEGENERATOR: [0],
+    IFCTEXTUREMAP: [0, 2],
+  },
+  IFC4X3: {
+    IFCAPPROVALRELATIONSHIP: [2, 3],
+    IFCDOCUMENTINFORMATIONRELATIONSHIP: [2, 3],
+    IFCEXTERNALREFERENCERELATIONSHIP: [2, 3],
+    IFCGEOMETRICREPRESENTATIONSUBCONTEXT: [6],
+    IFCINDEXEDCOLOURMAP: [0],
+    IFCINDEXEDPOLYGONALTEXTUREMAP: [0, 1, 3],
+    IFCINDEXEDTRIANGLETEXTUREMAP: [0, 1],
+    IFCMAPCONVERSION: [0],
+    IFCMAPCONVERSIONSCALED: [0],
+    IFCMATERIALPROPERTIES: [3],
+    IFCMATERIALRELATIONSHIP: [2, 3],
+    IFCORGANIZATIONRELATIONSHIP: [2, 3],
+    IFCPRESENTATIONLAYERASSIGNMENT: [2],
+    IFCPRESENTATIONLAYERWITHSTYLE: [2],
+    IFCPROFILEPROPERTIES: [3],
+    IFCPROPERTYDEPENDENCYRELATIONSHIP: [2, 3],
+    IFCRESOURCEAPPROVALRELATIONSHIP: [2, 3],
+    IFCRESOURCECONSTRAINTRELATIONSHIP: [2, 3],
+    IFCRIGIDOPERATION: [0],
+    IFCSHAPEASPECT: [0, 4],
+    IFCTEXTURECOORDINATEGENERATOR: [0],
+    IFCTEXTUREMAP: [0, 2],
+    IFCWELLKNOWNTEXT: [1],
+  },
+};
+
+const BACKWARD_TYPES = new Set(
+  Object.values(BACKWARD_ATTACHMENTS).flatMap((types) => Object.keys(types)),
+);
+
+interface BackwardEntry {
+  id: number;
+  type: string;
+  args: string[];
+  attach: readonly number[];
+  idPrefix: string;
+}
+
+function backwardEntries(
+  index: LineIndex,
+  family: IfcSchemaFamily,
+): BackwardEntry[] {
+  const table = BACKWARD_ATTACHMENTS[family];
+  const entries: BackwardEntry[] = [];
+  for (let id = 0; id <= index.maxId; id++) {
+    const type = index.getType(id);
+    const attach = type && table[type];
+    if (!attach) continue;
+    const raw = index.getRaw(id);
+    const argsStr = extractArgsString(raw);
+    const idMatch = raw?.match(/^(#\d+\s*=\s*)/);
+    if (!argsStr || !idMatch) continue;
+    entries.push({
+      id,
+      type: type!,
+      args: splitIfcArgs(argsStr),
+      attach,
+      idPrefix: idMatch[1],
+    });
+  }
+  return entries;
+}
+
+/**
+ * Adds every backward-attached entity whose target is in `fileIds`, with its
+ * dependencies, until nothing changes (an attached entity can be the target
+ * of another, e.g. a texture map and its coordinates). A list attribute is
+ * narrowed to the targets in the file (a layer assignment lists the
+ * representations of every element on that layer).
+ */
+function attachBackward(
+  entries: BackwardEntry[],
+  fileIds: IdSet,
+  index: LineIndex,
+  allElementIds: Set<number>,
+  rewrittenLines: Map<number, string>,
+): void {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const entry of entries) {
+      if (fileIds.has(entry.id)) continue;
+      let attached = false;
+      let newArgs: string[] | null = null;
+      const dropped = new Set<number>();
+      for (const i of entry.attach) {
+        const arg = entry.args[i];
+        if (arg === undefined) continue;
+        const refs = extractRefs(arg);
+        const present = refs.filter((r) => fileIds.has(r));
+        if (present.length === 0) continue;
+        attached = true;
+        if (present.length < refs.length && arg.trimStart().startsWith("(")) {
+          for (const r of refs) if (!fileIds.has(r)) dropped.add(r);
+          newArgs ??= [...entry.args];
+          newArgs[i] = rewriteListArg(arg, present);
+        }
+      }
+      if (!attached) continue;
+      if (newArgs) {
+        rewrittenLines.set(
+          entry.id,
+          `${entry.idPrefix}${entry.type}(${newArgs.join(",")});`,
+        );
+      }
+      fileIds.add(entry.id);
+      const refs = index.getRefs(entry.id);
+      if (refs) {
+        for (const r of refs) {
+          if (dropped.has(r) || allElementIds.has(r)) continue;
+          collectDeps(r, index, fileIds, allElementIds);
+        }
+      }
+      changed = true;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Compact line storage: sparse arrays indexed by IFC id
@@ -485,6 +683,7 @@ class LineIndex {
     this._refLen[id] = refs.length;
 
     if (
+      BACKWARD_TYPES.has(t) ||
       t.startsWith("IFCREL") ||
       t === "IFCSTYLEDITEM" ||
       t === "IFCMATERIALDEFINITIONREPRESENTATION"
@@ -1361,6 +1560,7 @@ export class IfcSplitter {
     // 3b. Build reverse style maps
     const styleMapsStart = performance.now();
     const styleMaps = buildStyleMaps(index);
+    const backward = backwardEntries(index, schemaFamily(header));
     this.emitProgressEvent("style-maps", styleMapsStart);
 
     // 4. Identify all building elements
@@ -1497,43 +1697,55 @@ export class IfcSplitter {
       resolveStyles(fileIds, index, styleMaps, allElementIds);
 
       const rewrittenLines = new Map<number, string>();
-      for (const rel of relEntries) {
-        // Keep this group's elements, the shared spatial structure (present in
-        // every file) and the non-element objects this group has claimed.
-        const filtered = rel.listRefs.filter(
-          (r) =>
-            groupElementIds.has(r) ||
-            sharedIds.has(r) ||
-            claimedBy.get(r) === g,
-        );
-        if (filtered.length === 0) continue;
-        if (
-          crossesFile(
+      // Two passes: the second also keeps non-element objects that the first
+      // brought into the file, e.g. the type objects of the group's elements,
+      // so their material and property relationships are not dropped.
+      for (const pass of [1, 2])
+        for (const rel of relEntries) {
+          if (crossPartIds.has(rel.id)) continue;
+          // Keep this group's elements, the shared spatial structure (present in
+          // every file) and the non-element objects this group has claimed.
+          const filtered = rel.listRefs.filter(
+            (r) =>
+              groupElementIds.has(r) ||
+              sharedIds.has(r) ||
+              claimedBy.get(r) === g ||
+              (pass === 2 && !allElementIds.has(r) && fileIds.has(r)),
+          );
+          if (filtered.length === 0) continue;
+          if (
+            crossesFile(
+              rel.id,
+              rel.listRefs,
+              filtered,
+              index,
+              allElementIds,
+              (id) => groupElementIds.has(id),
+            )
+          ) {
+            crossPartIds.add(rel.id);
+            continue;
+          }
+          const newArgs = [...rel.args];
+          newArgs[rel.listIdx] = rewriteListArg(
+            rel.args[rel.listIdx],
+            filtered,
+          );
+          const rewritten = `${rel.idPrefix}${rel.type}(${newArgs.join(",")});`;
+          rewrittenLines.set(rel.id, rewritten);
+          fileIds.add(rel.id);
+          collectRelDeps(
             rel.id,
             rel.listRefs,
             filtered,
             index,
+            fileIds,
             allElementIds,
-            (id) => groupElementIds.has(id),
-          )
-        ) {
-          crossPartIds.add(rel.id);
-          continue;
+          );
         }
-        const newArgs = [...rel.args];
-        newArgs[rel.listIdx] = rewriteListArg(rel.args[rel.listIdx], filtered);
-        const rewritten = `${rel.idPrefix}${rel.type}(${newArgs.join(",")});`;
-        rewrittenLines.set(rel.id, rewritten);
-        fileIds.add(rel.id);
-        collectRelDeps(
-          rel.id,
-          rel.listRefs,
-          filtered,
-          index,
-          fileIds,
-          allElementIds,
-        );
-      }
+
+      attachBackward(backward, fileIds, index, allElementIds, rewrittenLines);
+      resolveStyles(fileIds, index, styleMaps, allElementIds);
 
       const totalIds = fileIds.size;
       groupsData.push({
@@ -1631,6 +1843,7 @@ export class IfcSplitter {
 
     const styleMapsStart = performance.now();
     const styleMaps = buildStyleMaps(index);
+    const backward = backwardEntries(index, schemaFamily(header));
     this.emitProgressEvent("style-maps", styleMapsStart);
 
     const classifyStart = performance.now();
@@ -1680,40 +1893,49 @@ export class IfcSplitter {
     const fileIds = sharedIds.clone();
     const rewrittenLines = new Map<number, string>();
     const crossPartIds = new Set<number>();
-    for (let id = 0; id <= index.maxId; id++) {
-      const type = index.getType(id);
-      if (type && shouldRewriteType(type)) {
-        const raw = index.getRaw(id);
-        const argsStr = extractArgsString(raw);
-        if (!argsStr) continue;
-        const args = splitIfcArgs(argsStr);
-        const listIdx = this.config.listArgIndex(type) ?? -1;
-        if (listIdx < 0 || args.length <= listIdx) continue;
-        const listRefs = extractRefs(args[listIdx]);
-        if (listRefs.length === 0) continue;
+    // Run twice: before and after collecting the elements' dependencies, so
+    // that the second run also keeps non-element objects now in the file
+    // (e.g. type objects) in a relationship's list.
+    const rewriteRelations = (keepPresent: boolean) => {
+      for (let id = 0; id <= index.maxId; id++) {
+        const type = index.getType(id);
+        if (type && shouldRewriteType(type) && !crossPartIds.has(id)) {
+          const raw = index.getRaw(id);
+          const argsStr = extractArgsString(raw);
+          if (!argsStr) continue;
+          const args = splitIfcArgs(argsStr);
+          const listIdx = this.config.listArgIndex(type) ?? -1;
+          if (listIdx < 0 || args.length <= listIdx) continue;
+          const listRefs = extractRefs(args[listIdx]);
+          if (listRefs.length === 0) continue;
 
-        const filtered = listRefs.filter(
-          (r) => groupElementIds.has(r) || sharedIds.has(r),
-        );
-        if (filtered.length === 0) continue;
-        if (
-          crossesFile(id, listRefs, filtered, index, allElementIds, (eid) =>
-            groupElementIds.has(eid),
-          )
-        ) {
-          crossPartIds.add(id);
-          continue;
+          const filtered = listRefs.filter(
+            (r) =>
+              groupElementIds.has(r) ||
+              sharedIds.has(r) ||
+              (keepPresent && !allElementIds.has(r) && fileIds.has(r)),
+          );
+          if (filtered.length === 0) continue;
+          if (
+            crossesFile(id, listRefs, filtered, index, allElementIds, (eid) =>
+              groupElementIds.has(eid),
+            )
+          ) {
+            crossPartIds.add(id);
+            continue;
+          }
+
+          const idMatch = raw!.match(/^(#\d+\s*=\s*)/);
+          if (!idMatch) continue;
+          const newArgs = [...args];
+          newArgs[listIdx] = rewriteListArg(args[listIdx], filtered);
+          rewrittenLines.set(id, `${idMatch[1]}${type}(${newArgs.join(",")});`);
+          fileIds.add(id);
+          collectRelDeps(id, listRefs, filtered, index, fileIds, allElementIds);
         }
-
-        const idMatch = raw!.match(/^(#\d+\s*=\s*)/);
-        if (!idMatch) continue;
-        const newArgs = [...args];
-        newArgs[listIdx] = rewriteListArg(args[listIdx], filtered);
-        rewrittenLines.set(id, `${idMatch[1]}${type}(${newArgs.join(",")});`);
-        fileIds.add(id);
-        collectRelDeps(id, listRefs, filtered, index, fileIds, allElementIds);
       }
-    }
+    };
+    rewriteRelations(false);
     this.emitProgressEvent("relations", relationsStart);
 
     // 6. Collect all dependencies
@@ -1732,6 +1954,9 @@ export class IfcSplitter {
           collectDeps(rid, index, fileIds, allElementIds);
       }
     }
+    resolveStyles(fileIds, index, styleMaps, allElementIds);
+    rewriteRelations(true);
+    attachBackward(backward, fileIds, index, allElementIds, rewrittenLines);
     resolveStyles(fileIds, index, styleMaps, allElementIds);
 
     const crossPartRelations = [...crossPartIds]
