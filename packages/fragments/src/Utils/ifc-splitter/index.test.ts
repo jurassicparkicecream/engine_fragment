@@ -1,4 +1,4 @@
-import { readFile } from "fs/promises";
+import { mkdir, readFile, writeFile } from "fs/promises";
 import * as path from "path";
 import { expect, test, vi } from "vitest";
 import * as WEBIFC from "web-ifc";
@@ -869,6 +869,56 @@ test("split writes positioning elements and IfcRelPositions into every file", as
     );
   }
   expect(onCrossPart.mock.calls[0][0].relations).toEqual([]);
+});
+
+test("IfcSplitterNode copies bytes unchanged, whatever the text encoding", async () => {
+  // ISO 10303-21 wants ASCII, but exporters write raw UTF-8 and ISO 8859-1.
+  const dir = path.resolve(__dirname, ".tmp", "encoding");
+  await mkdir(dir, { recursive: true });
+  const input = path.join(dir, "in.ifc");
+  const latin1Name = Buffer.from([0x47, 0x65, 0x6c, 0xe4, 0x6e, 0x64, 0x65]); // "Gelände" in ISO 8859-1
+  const utf8Name = Buffer.from("Gelände", "utf8");
+  const source = Buffer.concat([
+    Buffer.from(
+      "ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n#1=IFCWALL('guid1',$,'",
+    ),
+    latin1Name,
+    Buffer.from("',$,$,$,$,$,$);\n#2=IFCWALL('guid2',$,'"),
+    utf8Name,
+    Buffer.from("',$,$,$,$,$,$);\nENDSEC;\nEND-ISO-10303-21;\n"),
+  ]);
+  await writeFile(input, source);
+  const output = path.join(dir, "out.ifc");
+  await new IfcSplitterNode().split(input, 1, () => output);
+  const written = await readFile(output);
+  expect(written.includes(Buffer.from([0x27, ...latin1Name, 0x27]))).toBe(true);
+  expect(written.includes(Buffer.concat([Buffer.from("'"), utf8Name]))).toBe(
+    true,
+  );
+});
+
+test("a layer keeps representations that only the first file takes as leftovers", async () => {
+  const source = [
+    "ISO-10303-21;",
+    "HEADER;",
+    "FILE_SCHEMA(('IFC4'));",
+    "ENDSEC;",
+    "DATA;",
+    "#1=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,$,$);",
+    "#2=IFCWALL('guid2',$,$,$,$,$,#3,$,$);",
+    "#3=IFCPRODUCTDEFINITIONSHAPE($,$,(#4));",
+    "#4=IFCSHAPEREPRESENTATION(#1,'Body','Brep',());",
+    // a representation nothing uses, but on the layer
+    "#5=IFCSHAPEREPRESENTATION(#1,'Body','Brep',());",
+    "#6=IFCPRESENTATIONLAYERASSIGNMENT('Layer',$,(#4,#5),$);",
+    "ENDSEC;",
+    "END-ISO-10303-21;",
+  ].join("\n");
+  const io = new MemoryIO(source);
+  await new IfcSplitter(io).split("in.ifc", 1, () => "out.ifc");
+  expect(io.sinks.get("out.ifc")!.text).toContain(
+    "#6=IFCPRESENTATIONLAYERASSIGNMENT('Layer',$,(#4,#5),$);",
+  );
 });
 
 test("spatialTypes decides what is shared across every group", async () => {

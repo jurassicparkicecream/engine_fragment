@@ -13,12 +13,16 @@ export class IfcSplitterNode extends IfcSplitter {
         readableStream: async (path) =>
           (await openAsBlob(path, { type: "text/plain" }))
             .stream()
-            .pipeThrough(new IfcDecoderStream()),
+            // byte for byte: an exporter's raw UTF-8 or ISO 8859-1 text
+            // comes out exactly as it went in
+            .pipeThrough(new IfcDecoderStream("binary")),
 
         writableStream: async (path) => {
           await mkdir(dirname(path), { recursive: true });
           const fileHandle = await open(path, "w");
-          const nodeWritable = fileHandle.createWriteStream();
+          const nodeWritable = fileHandle.createWriteStream({
+            encoding: "latin1",
+          });
           return Writable.toWeb(nodeWritable) as WritableStream<string>;
         },
       },

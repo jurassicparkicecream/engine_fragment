@@ -689,7 +689,10 @@ function attachBackward(
   while (changed) {
     changed = false;
     for (const entry of entries) {
-      if (fileIds.has(entry.id)) continue;
+      // Already attached with a narrowed list: widen it if more of its targets
+      // came into the file since (e.g. the first file's leftovers).
+      if (fileIds.has(entry.id) && !rewrittenLines.has(entry.id)) continue;
+      const wasAttached = fileIds.has(entry.id);
       let attached = false;
       let newArgs: string[] | null = null;
       const dropped = new Set<number>();
@@ -707,11 +710,15 @@ function attachBackward(
         }
       }
       if (!attached) continue;
-      if (newArgs) {
-        rewrittenLines.set(
-          entry.id,
-          `${entry.idPrefix}${entry.type}(${newArgs.join(",")});`,
-        );
+      const line = newArgs
+        ? `${entry.idPrefix}${entry.type}(${newArgs.join(",")});`
+        : undefined;
+      if (wasAttached) {
+        if (line === rewrittenLines.get(entry.id)) continue;
+        if (line) rewrittenLines.set(entry.id, line);
+        else rewrittenLines.delete(entry.id);
+      } else if (line) {
+        rewrittenLines.set(entry.id, line);
       }
       fileIds.add(entry.id);
       const refs = index.getRefs(entry.id);

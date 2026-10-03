@@ -28,10 +28,31 @@ const nl = "\n";
  * }
  * ```
  */
+/**
+ * Maps each byte to the character with the same code (0–255), so that writing
+ * the text back byte by byte (e.g. Node's "latin1") reproduces the input
+ * exactly, whatever encoding it used.
+ */
+const binaryDecoder = {
+  decode(chunk?: Uint8Array, _options?: { stream?: boolean }): string {
+    if (!chunk) return "";
+    let text = "";
+    for (let i = 0; i < chunk.length; i += 0x8000) {
+      text += String.fromCharCode(...chunk.subarray(i, i + 0x8000));
+    }
+    return text;
+  },
+};
+
 export class IfcDecoderStream extends TransformStream<Uint8Array, string> {
+  /**
+   * @param encoding - a `TextDecoder` label, or `"binary"` for a lossless
+   * byte-to-character mapping (see {@link binaryDecoder}).
+   */
   constructor(encoding = "utf-8") {
     let tail = "";
-    const decoder = new TextDecoder(encoding);
+    const decoder =
+      encoding === "binary" ? binaryDecoder : new TextDecoder(encoding);
 
     super({
       transform(chunk, controller) {
