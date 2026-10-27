@@ -924,6 +924,30 @@ export class IdSet implements Iterable<number> {
 // Collect all ids referenced by a given id, recursively.
 // Stops at element boundaries to avoid pulling in other groups' elements.
 // ---------------------------------------------------------------------------
+/**
+ * An IdSet that remembers what was added, so it can be read out and emptied
+ * in time proportional to its content rather than to `maxId`. Reused for the
+ * subgraph of every cross-part relationship: a fresh IdSet per relationship
+ * meant allocating and scanning the whole bitset each time (#385, profile:
+ * 48 % of the split time on a 1.3 GB file with 44 118 such relationships).
+ */
+class TrackingIdSet extends IdSet {
+  private added: number[] = [];
+
+  add(id: number): this {
+    if (id >= 0 && id <= this.maxId && !this.has(id)) this.added.push(id);
+    return super.add(id);
+  }
+
+  /** The ids in ascending order (like iterating an IdSet); empties the set. */
+  drain(): number[] {
+    const ids = this.added.sort((a, b) => a - b);
+    for (const id of ids) this.delete(id);
+    this.added = [];
+    return ids;
+  }
+}
+
 function collectDeps(
   startId: number,
   index: LineIndex,
@@ -1274,6 +1298,7 @@ function describeCrossPartRelation(
   allElementIds: Set<number>,
   groupOf: (id: number) => number | null,
   subgraphIdsOut: Map<number, number[]>,
+  scratch: TrackingIdSet,
 ): IfcSplitterCrossPartRelation {
   const raw = index.getRaw(relId);
   const args = splitIfcArgs(extractArgsString(raw) ?? "");
@@ -1308,9 +1333,8 @@ function describeCrossPartRelation(
       });
     });
   });
-  const closure = new IdSet(index.maxId);
-  for (const id of subgraphIds) collectDeps(id, index, closure, allElementIds);
-  subgraphIdsOut.set(relId, [...closure]);
+  for (const id of subgraphIds) collectDeps(id, index, scratch, allElementIds);
+  subgraphIdsOut.set(relId, scratch.drain());
   return {
     type: index.getType(relId) ?? "",
     guid: guidOfRaw(raw),
@@ -2072,6 +2096,7 @@ export class IfcSplitter {
     }
 
     const subgraphIds = new Map<number, number[]>();
+    const scratch = new TrackingIdSet(index.maxId);
     const crossPartRelations = [...crossPartIds]
       .sort((a, b) => a - b)
       .map((id) =>
@@ -2081,6 +2106,7 @@ export class IfcSplitter {
           allElementIds,
           (eid) => groupOf.get(eid) ?? null,
           subgraphIds,
+          scratch,
         ),
       );
 
@@ -2287,6 +2313,7 @@ export class IfcSplitter {
     dropDanglingRelations(relIds, index, fileIds, rewrittenLines, crossPartIds);
 
     const subgraphIds = new Map<number, number[]>();
+    const scratch = new TrackingIdSet(index.maxId);
     const crossPartRelations = [...crossPartIds]
       .sort((a, b) => a - b)
       .map((id) =>
@@ -2296,6 +2323,7 @@ export class IfcSplitter {
           allElementIds,
           (eid) => (groupElementIds.has(eid) ? 0 : null),
           subgraphIds,
+          scratch,
         ),
       );
     this.emitProgressEvent("resolve", resolveStart);
