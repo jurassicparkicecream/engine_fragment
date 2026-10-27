@@ -207,8 +207,12 @@ interface RelEntry {
   args: string[];
   listIdx: number;
   listRefs: number[];
+  /** `listRefs` as a set, built on first use (lists can be very long). */
+  listSet?: Set<number>;
   idPrefix: string;
 }
+
+const listSetOf = (rel: RelEntry) => (rel.listSet ??= new Set(rel.listRefs));
 
 // ---------------------------------------------------------------------------
 // IFC element categories we consider "splittable building elements"
@@ -644,6 +648,8 @@ interface BackwardEntry {
   args: string[];
   attach: readonly number[];
   idPrefix: string;
+  /** References per attached attribute, parsed on first use. */
+  refs?: Map<number, number[]>;
 }
 
 function backwardEntries(
@@ -699,7 +705,9 @@ function attachBackward(
       for (const i of entry.attach) {
         const arg = entry.args[i];
         if (arg === undefined) continue;
-        const refs = extractRefs(arg);
+        entry.refs ??= new Map();
+        let refs = entry.refs.get(i);
+        if (!refs) entry.refs.set(i, (refs = extractRefs(arg)));
         const present = refs.filter((r) => fileIds.has(r));
         if (present.length === 0) continue;
         attached = true;
@@ -1219,19 +1227,17 @@ function claimStructureMembers(
  */
 function collectRelDeps(
   relId: number,
-  listRefs: number[],
-  kept: number[],
+  inList: (id: number) => boolean,
+  kept: (id: number) => boolean,
   index: LineIndex,
   fileIds: IdSet,
   allElementIds: Set<number>,
 ): void {
   const refs = index.getRefs(relId);
   if (!refs) return;
-  const dropped = new Set(listRefs);
-  for (const r of kept) dropped.delete(r);
   for (const rid of refs) {
-    if (allElementIds.has(rid) || dropped.has(rid) || index.isRel(rid))
-      continue;
+    if (allElementIds.has(rid) || index.isRel(rid)) continue;
+    if (inList(rid) && !kept(rid)) continue;
     collectDeps(rid, index, fileIds, allElementIds);
   }
 }
@@ -1243,19 +1249,17 @@ function collectRelDeps(
  */
 function crossesFile(
   relId: number,
-  listRefs: number[],
-  kept: number[],
+  inList: (id: number) => boolean,
+  kept: (id: number) => boolean,
   index: LineIndex,
   allElementIds: Set<number>,
   inFile: (id: number) => boolean,
 ): boolean {
   const refs = index.getRefs(relId);
   if (!refs) return false;
-  const keptSet = new Set(kept);
-  const listSet = new Set(listRefs);
   for (const r of refs) {
     if (!allElementIds.has(r) || inFile(r)) continue;
-    if (listSet.has(r) && !keptSet.has(r)) continue;
+    if (inList(r) && !kept(r)) continue;
     return true;
   }
   return false;
@@ -1903,30 +1907,28 @@ export class IfcSplitter {
       // changes, because a kept relationship can bring in an object that an
       // earlier listed relationship needs.
       const crossedHere = new Set<number>();
+      // The kept list only grows from pass to pass (`fileIds` only grows
+      // here), so the same length means the same list: nothing new to do.
+      const keptBefore = new Map<number, number>();
+      const inGroup = (id: number) => groupElementIds.has(id);
       for (let pass = firstPass; ; pass++) {
         const before = fileIds.size;
+        // Keep this group's elements, the shared spatial structure (present in
+        // every file) and the non-element objects this group has claimed.
+        const keep = (r: number) =>
+          groupElementIds.has(r) ||
+          sharedIds.has(r) ||
+          claimedBy.get(r) === g ||
+          (pass > 1 && !allElementIds.has(r) && fileIds.has(r));
         for (const rel of relEntries) {
           if (crossedHere.has(rel.id)) continue;
-          // Keep this group's elements, the shared spatial structure (present in
-          // every file) and the non-element objects this group has claimed.
-          const filtered = rel.listRefs.filter(
-            (r) =>
-              groupElementIds.has(r) ||
-              sharedIds.has(r) ||
-              claimedBy.get(r) === g ||
-              (pass > 1 && !allElementIds.has(r) && fileIds.has(r)),
-          );
+          const filtered = rel.listRefs.filter(keep);
           if (filtered.length === 0) continue;
-          if (
-            crossesFile(
-              rel.id,
-              rel.listRefs,
-              filtered,
-              index,
-              allElementIds,
-              (id) => groupElementIds.has(id),
-            )
-          ) {
+          if (keptBefore.get(rel.id) === filtered.length) continue;
+          keptBefore.set(rel.id, filtered.length);
+          const listSet = listSetOf(rel);
+          const inList = (id: number) => listSet.has(id);
+          if (crossesFile(rel.id, inList, keep, index, allElementIds, inGroup)) {
             crossPartIds.add(rel.id);
             crossedHere.add(rel.id);
             continue;
@@ -1939,14 +1941,7 @@ export class IfcSplitter {
           const rewritten = `${rel.idPrefix}${rel.type}(${newArgs.join(",")});`;
           rewrittenLines.set(rel.id, rewritten);
           fileIds.add(rel.id);
-          collectRelDeps(
-            rel.id,
-            rel.listRefs,
-            filtered,
-            index,
-            fileIds,
-            allElementIds,
-          );
+          collectRelDeps(rel.id, inList, keep, index, fileIds, allElementIds);
         }
         if (pass > 1 && fileIds.size === before) break;
       }
@@ -2031,9 +2026,10 @@ export class IfcSplitter {
         groupsData.push(first);
       }
       const inFirst = (id: number) => groups[first.groupId].has(id);
+      const none = () => false;
       for (const id of leftovers) {
         if (
-          crossesFile(id, [], [], index, allElementIds, inFirst) ||
+          crossesFile(id, none, none, index, allElementIds, inFirst) ||
           (allElementIds.has(id) && !inFirst(id))
         ) {
           if (shouldRewriteType(index.getType(id) ?? "")) crossPartIds.add(id);
@@ -2239,8 +2235,12 @@ export class IfcSplitter {
               (keepPresent && !allElementIds.has(r) && fileIds.has(r)),
           );
           if (filtered.length === 0) continue;
+          const listSet = new Set(listRefs);
+          const keptSet = new Set(filtered);
+          const inList = (r: number) => listSet.has(r);
+          const kept = (r: number) => keptSet.has(r);
           if (
-            crossesFile(id, listRefs, filtered, index, allElementIds, (eid) =>
+            crossesFile(id, inList, kept, index, allElementIds, (eid) =>
               groupElementIds.has(eid),
             )
           ) {
@@ -2254,7 +2254,7 @@ export class IfcSplitter {
           newArgs[listIdx] = rewriteListArg(args[listIdx], filtered);
           rewrittenLines.set(id, `${idMatch[1]}${type}(${newArgs.join(",")});`);
           fileIds.add(id);
-          collectRelDeps(id, listRefs, filtered, index, fileIds, allElementIds);
+          collectRelDeps(id, inList, kept, index, fileIds, allElementIds);
         }
       }
     };
