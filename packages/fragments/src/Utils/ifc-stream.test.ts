@@ -4,6 +4,7 @@ import { parseStepArguments } from "./ifc-parsing-utils";
 import {
   IfcDecoderStream,
   IfcParserStream,
+  IfcLineBatchStream,
   streamAsyncIterator,
 } from "./ifc-stream";
 
@@ -420,4 +421,26 @@ test("IfcDecoderStream and IfcParserStream compose over byte chunks", async () =
   expect(entities[0].Coordinates.map((c: any) => c.value)).toEqual([
     1.5, 2.5, 3.5,
   ]);
+});
+
+test("IfcLineBatchStream yields the same lines as IfcDecoderStream, batched per block", async () => {
+  const text = "ISO;\r\n#1=A('x');\n#2=B(\r\n'y');\r\n\r\nEND;";
+  const bytes = new TextEncoder().encode(text);
+  // Cut everywhere, also between \r and \n.
+  for (let cut = 1; cut < bytes.length; cut++) {
+    const blocks = () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, cut));
+          controller.enqueue(bytes.slice(cut));
+          controller.close();
+        },
+      });
+    const single: string[] = [];
+    for await (const line of streamAsyncIterator(blocks().pipeThrough(new IfcDecoderStream("binary")))) single.push(line);
+    const batched: string[][] = [];
+    for await (const batch of streamAsyncIterator(blocks().pipeThrough(new IfcLineBatchStream("binary")))) batched.push(batch);
+    expect(batched.flat()).toEqual(single);
+    expect(batched.length).toBeLessThanOrEqual(3);
+  }
 });

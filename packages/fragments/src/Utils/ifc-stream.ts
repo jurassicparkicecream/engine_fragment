@@ -44,56 +44,90 @@ const binaryDecoder = {
   },
 };
 
-export class IfcDecoderStream extends TransformStream<Uint8Array, string> {
-  /**
-   * @param encoding - a `TextDecoder` label, or `"binary"` for a lossless
-   * byte-to-character mapping (see {@link binaryDecoder}).
-   */
-  constructor(encoding = "utf-8") {
-    let tail = "";
-    const decoder =
-      encoding === "binary" ? binaryDecoder : new TextDecoder(encoding);
+/**
+ * Splits decoded text into lines (LF or CRLF, also across chunk borders) and
+ * hands every complete line to `emit`. Shared by IfcDecoderStream (one chunk
+ * per line) and IfcLineBatchStream (one chunk per input block).
+ */
+function lineSplitter(encoding: string) {
+  let tail = "";
+  const decoder =
+    encoding === "binary" ? binaryDecoder : new TextDecoder(encoding);
+  return {
+    transform(chunk: Uint8Array, emit: (line: string) => void) {
+      const text = decoder.decode(chunk, { stream: true });
+      if (!text) return;
+      let start = 0;
+      let idx = text.indexOf(nl);
 
+      if (idx !== -1) {
+        let end = idx;
+        if (end > 0 && text.charCodeAt(end - 1) === crCharCode) end--;
+        else if (end === 0 && tail.charCodeAt(tail.length - 1) === crCharCode)
+          tail = tail.slice(0, -1); // CRLF pair split across two chunks
+        emit(
+          tail ? tail + text.substring(start, end) : text.substring(start, end),
+        );
+        tail = "";
+        start = idx + 1;
+        idx = text.indexOf(nl, start);
+      } else {
+        tail += text;
+        return;
+      }
+
+      while (idx !== -1) {
+        let end = idx;
+        if (end > start && text.charCodeAt(end - 1) === crCharCode) end--;
+        emit(text.substring(start, end));
+        start = idx + 1;
+        idx = text.indexOf(nl, start);
+      }
+
+      if (start < text.length) tail = text.substring(start);
+    },
+
+    flush(emit: (line: string) => void) {
+      const remaining = decoder.decode();
+      const full = tail + remaining;
+      if (full) emit(full);
+    },
+  };
+}
+
+export class IfcDecoderStream extends TransformStream<Uint8Array, string> {
+  constructor(encoding = "utf-8") {
+    const lines = lineSplitter(encoding);
     super({
       transform(chunk, controller) {
-        const text = decoder.decode(chunk, { stream: true });
-        if (!text) return;
-        let start = 0;
-        let idx = text.indexOf(nl);
-
-        if (idx !== -1) {
-          let end = idx;
-          if (end > 0 && text.charCodeAt(end - 1) === crCharCode) end--;
-          else if (end === 0 && tail.charCodeAt(tail.length - 1) === crCharCode)
-            tail = tail.slice(0, -1); // CRLF pair split across two chunks
-          controller.enqueue(
-            tail
-              ? tail + text.substring(start, end)
-              : text.substring(start, end),
-          );
-          tail = "";
-          start = idx + 1;
-          idx = text.indexOf(nl, start);
-        } else {
-          tail += text;
-          return;
-        }
-
-        while (idx !== -1) {
-          let end = idx;
-          if (end > start && text.charCodeAt(end - 1) === crCharCode) end--;
-          controller.enqueue(text.substring(start, end));
-          start = idx + 1;
-          idx = text.indexOf(nl, start);
-        }
-
-        if (start < text.length) tail = text.substring(start);
+        lines.transform(chunk, (line) => controller.enqueue(line));
       },
-
       flush(controller) {
-        const remaining = decoder.decode();
-        const full = tail + remaining;
-        if (full) controller.enqueue(full);
+        lines.flush((line) => controller.enqueue(line));
+      },
+    });
+  }
+}
+
+/**
+ * Like IfcDecoderStream, but one chunk per input block holding all lines that
+ * block completed: a reader then pays its per-chunk cost (promises, queue)
+ * once per block instead of once per line (#385, a large file has tens of
+ * millions of lines). Same lines in the same order.
+ */
+export class IfcLineBatchStream extends TransformStream<Uint8Array, string[]> {
+  constructor(encoding = "utf-8") {
+    const lines = lineSplitter(encoding);
+    super({
+      transform(chunk, controller) {
+        const batch: string[] = [];
+        lines.transform(chunk, (line) => batch.push(line));
+        if (batch.length) controller.enqueue(batch);
+      },
+      flush(controller) {
+        const batch: string[] = [];
+        lines.flush((line) => batch.push(line));
+        if (batch.length) controller.enqueue(batch);
       },
     });
   }

@@ -53,7 +53,8 @@ export interface IfcSplitterIO {
    * @throws if {@link path} doesn't exist
    * @returns a {@link ReadableStream} streaming ifc lines
    */
-  readableStream(path: string): Promise<ReadableStream<string>>;
+  /** Lines, one per chunk or batched as arrays (IfcLineBatchStream). */
+  readableStream(path: string): Promise<ReadableStream<string | string[]>>;
 
   /**
    * @param path
@@ -1674,12 +1675,17 @@ class IdGroupIndex {
   }
 }
 
-async function emitSplitLine(
+/**
+ * Writes the line to every group that holds it. Returns a promise only if a
+ * writer returned one (a WritableStream: its backpressure is kept); a writer
+ * that writes synchronously costs no promise per line (#385).
+ */
+function emitSplitLine(
   writers: WritableStreamDefaultWriter[],
   raw: string,
   groupsData: GroupData[],
   idGroups: IdGroupIndex,
-): Promise<void> {
+): Promise<void> | undefined {
   if (raw.charCodeAt(0) !== 35) return; // '#'
   let id = 0;
   for (let i = 1; i < raw.length; i++) {
@@ -1693,11 +1699,19 @@ async function emitSplitLine(
   if (id === 0) return;
 
   const groups = idGroups.groupsOf(id);
+  let pending: Promise<void> | undefined;
   for (let i = 0; i < groups.length; i++) {
     const g = groups[i];
-    const line = groupsData[g].rewrittenLines.get(id) ?? raw;
-    await writers[g].write(`${line}\n`);
+    const text = `${groupsData[g].rewrittenLines.get(id) ?? raw}\n`;
+    const writer = writers[g];
+    if (pending) {
+      pending = pending.then(() => writer.write(text));
+      continue;
+    }
+    const written = writer.write(text) as Promise<void> | undefined;
+    if (written && typeof written.then === "function") pending = written;
   }
+  return pending;
 }
 
 async function emitExtractLine(
@@ -2468,8 +2482,18 @@ export class IfcSplitter {
   ): Promise<void> {
     const readableStream = await this.io.readableStream(filePath);
 
-    for await (const line of streamAsyncIterator(readableStream)) {
-      await callback(line);
+    // Await only what returns a promise: with tens of millions of lines, an
+    // `await` per line is a large share of the time (#385).
+    for await (const chunk of streamAsyncIterator(readableStream)) {
+      if (typeof chunk === "string") {
+        const pending = callback(chunk);
+        if (pending) await pending;
+        continue;
+      }
+      for (let i = 0; i < chunk.length; i++) {
+        const pending = callback(chunk[i]);
+        if (pending) await pending;
+      }
     }
   }
 
@@ -2489,34 +2513,33 @@ export class IfcSplitter {
     let closed = false;
 
     try {
-      await this.forEachLine(inputPath, async (line: string) => {
+      // Not async: it returns emitSplitLine's promise only when a writer gave
+      // one, and forEachLine awaits only that (#385).
+      await this.forEachLine(inputPath, (line: string) => {
         if (section === "header") {
           if (line.trim() === "DATA;") section = "data";
-          return;
+          return undefined;
         }
-        if (section === "data") {
-          const trimmed = stripComments(line, comments).trim();
-          if (!trimmed) return;
-          if (trimmed === "ENDSEC;") {
-            if (accumulator) {
-              await emitSplitLine(writers, accumulator, groupsData, idGroups);
-              accumulator = "";
-            }
-            section = "footer";
-            return;
-          }
-
-          if (!accumulator && trimmed.charCodeAt(trimmed.length - 1) === 59) {
-            await emitSplitLine(writers, trimmed, groupsData, idGroups);
-            return;
-          }
-
-          accumulator += (accumulator ? " " : "") + trimmed;
-          if (accumulator.charCodeAt(accumulator.length - 1) === 59) {
-            await emitSplitLine(writers, accumulator, groupsData, idGroups);
-            accumulator = "";
-          }
+        if (section !== "data") return undefined;
+        const trimmed = stripComments(line, comments).trim();
+        if (!trimmed) return undefined;
+        if (trimmed === "ENDSEC;") {
+          section = "footer";
+          if (!accumulator) return undefined;
+          const statement = accumulator;
+          accumulator = "";
+          return emitSplitLine(writers, statement, groupsData, idGroups);
         }
+
+        if (!accumulator && trimmed.charCodeAt(trimmed.length - 1) === 59) {
+          return emitSplitLine(writers, trimmed, groupsData, idGroups);
+        }
+
+        accumulator += (accumulator ? " " : "") + trimmed;
+        if (accumulator.charCodeAt(accumulator.length - 1) !== 59) return undefined;
+        const statement = accumulator;
+        accumulator = "";
+        return emitSplitLine(writers, statement, groupsData, idGroups);
       });
 
       const footerStr = `${footer.join("\n")}\n`;
